@@ -38,6 +38,7 @@ FOOTER_RE = re.compile(
     r"(?i)^\s*(total\s*mhrs?|available\s+man|remaining|def+iciency|required\s+man\s*power|average\s+required|"
     r"no\.?\s*of\s+employees|difference|division\s*/\s*depart|qty\s+of)")
 INTERNAL_CODE = "1100100"
+ROW_TOTAL_RE = re.compile(r"^=SUM\(([A-Z]{1,3})(\d+):([A-Z]{1,3})(\d+)\)$", re.I)
 MONTH_TEXT_RE = re.compile(r"^([A-Za-z]{3})[-\s/]?(\d{2,4})$")
 
 
@@ -70,7 +71,7 @@ def parse_project_code(col_a, activity: str) -> ProjectCode:
             code = m.group(1) + m.group(2)
             return ProjectCode(code, code, "", source, f"short form '{m.group(0)}' merged")
         # 7-8 digit code with optional suffix: 5020250-7, 3835210-1, 1251100- C1-2
-        m = re.match(r"^(\d{7,8})(?:\s*-\s*([A-Za-z]?\d{1,2}(?:-\d{1,2})?)(?![\d]))?", candidate)
+        m = re.match(r"^(\d{7,8})(?:\s*-\s*([A-Za-z]?\d{1,2}(?:-\d{1,2})?(?!\d)|[A-Za-z](?![A-Za-z\d])))?", candidate)
         if m:
             base, suffix = m.group(1), (m.group(2) or "")
             full = f"{base}-{suffix}" if suffix else base
@@ -149,6 +150,8 @@ class CellRecord:
     row_fill: str
     has_comment: bool
     comment: str = ""
+    remark: str = ""           # text a department wrote under the title in the same cell
+    typed_code: str = ""       # code typed in column A (not the =LEFT formula), when it parses
 
 
 @dataclass
@@ -191,6 +194,9 @@ def parse_workbook(path: str | Path, dept_code: str | None = None) -> ParsedWork
             text = str(b.value).strip() if b.value is not None else ""
             if text == "None":   # literal text left by copy-paste
                 text = ""
+            # a department may write a justification under the title in the same cell
+            text, _, remark = text.partition("\n")
+            text, remark = text.strip(), " ".join(remark.split())
             if not text and (a.value is None or str(a.value).startswith("=")):
                 if all(ws.cell(r, c).value in (None, "") for c in month_cols):
                     continue  # empty template row
@@ -234,14 +240,23 @@ def parse_workbook(path: str | Path, dept_code: str | None = None) -> ParsedWork
                 out.issues.append(dict(file=path.name, sheet=ws.title, row=r, severity="Warning",
                                        issue="Project code not identified", detail=f"A='{a.value}' B='{text[:60]}'"))
             category = "Internal / Unforeseen" if (phase == "Running" and code.base == INTERNAL_CODE) else phase
+            typed_code = parse_project_code(typed_a, "").full if typed_a is not None else ""
             row_fill = _fill(a) or _fill(b)
             for c, mth in month_cols.items():
                 cf, cv = ws.cell(r, c), wsv.cell(r, c)
                 raw = cf.value
                 val, note = None, ""
                 if isinstance(raw, str) and raw.startswith("="):
-                    val = cv.value if isinstance(cv.value, (int, float)) else None
-                    note = "formula"
+                    tot = ROW_TOTAL_RE.match(raw.replace("$", "").replace(" ", ""))
+                    if tot and int(tot.group(2)) == r and int(tot.group(4)) == r:
+                        # a row total typed into a month cell is not a monthly value
+                        out.issues.append(dict(file=path.name, sheet=ws.title, row=r, severity="High",
+                                               issue="Row-total formula in a month cell ignored (planning value kept)",
+                                               detail=f"{cf.coordinate} '{raw}' = {cv.value} ({text[:40]})"))
+                        val, note = None, "row-total formula ignored"
+                    else:
+                        val = cv.value if isinstance(cv.value, (int, float)) else None
+                        note = "formula"
                 elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
                     val = float(raw)
                 elif isinstance(raw, str):
@@ -261,8 +276,8 @@ def parse_workbook(path: str | Path, dept_code: str | None = None) -> ParsedWork
                     path.name, ws.title, r, out.dept_file, section, phase, category,
                     code.full, code.base, code.suffix, code.source, code.note,
                     str(a.value) if a.value is not None else "", text, mth, raw, val, note,
-                    font_red, _fill(cf), row_fill, bool(cmt), cmt))
-                if note and not note.startswith("formula"):
+                    font_red, _fill(cf), row_fill, bool(cmt), cmt, remark, typed_code))
+                if note and not note.startswith(("formula", "row-total")):
                     out.issues.append(dict(file=path.name, sheet=ws.title, row=r, severity="Warning",
                                            issue=f"Cell value: {note}", detail=f"{cf.coordinate} '{raw}' ({text[:40]})"))
     return out

@@ -1,14 +1,19 @@
 """Management aggregations: department, project, monthly, capacity, checks and checklist."""
 from __future__ import annotations
 
+import datetime as dt
 import difflib
 import math
+import re
 from pathlib import Path
+
+import openpyxl
 
 import numpy as np
 import pandas as pd
 
 from compare import KEY, TOL, _norm_name, _sim, severity
+from workbook_parser import INTERNAL_CODE
 
 HOURS_PER_MAN_MONTH = 150          # as used in the Forecast Comments PBIX (AvailMHR = EffTotal*Months*150)
 PERMANENT_EFFECTIVENESS = 0.9      # PBIX Dept query: Perm_EFF = ROUNDUP(Permanent_No * 0.9)
@@ -52,8 +57,30 @@ def load_capacity(employee_xlsx: str | Path) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-def feedback_status(rows: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
-    """Was feedback received, and did it change anything?"""
+def load_tracker(path: str | Path | None) -> dict[str, dict]:
+    """Sent / received dates per department from the round tracker ('Disciplines Review' sheet)."""
+    if not path or not Path(path).exists():
+        return {}
+    wb = openpyxl.load_workbook(path, data_only=True)
+    if "Disciplines Review" not in wb.sheetnames:
+        return {}
+    ws = wb["Disciplines Review"]
+    out = {}
+    for r in ws.iter_rows(min_row=2, values_only=True):
+        m = re.match(r"^\s*(\d{3,4})", str(r[0] or ""))
+        if not m:
+            continue
+        date = lambda v: v.date() if isinstance(v, dt.datetime) else None
+        rec = {"Sent": date(r[1]), "Received": date(r[2]), "Label": str(r[0]).strip()}
+        code = m.group(1)
+        for d in (["2410", "2420", "2430", "2440", "2450"] if code == "2400" else [code]):
+            out[d] = rec
+    return out
+
+
+def feedback_status(rows: pd.DataFrame, df: pd.DataFrame, tracker: dict | None = None) -> pd.DataFrame:
+    """Was feedback received, was the file available for analysis, and did it change anything?"""
+    tracker = tracker or {}
     d = df[df["Scenario"] == "Discipline Comment"].groupby("DeptCode").agg(
         Feedback_File=("SourceFile", "first"), Feedback_Source=("SourceType", "first"))
     rec = []
@@ -62,12 +89,19 @@ def feedback_status(rows: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         f = d.loc[dept] if dept in d.index else None
         file = f["Feedback_File"] if f is not None else ""
         commented = file.endswith("-c.xlsx")
-        status = ("No feedback file" if f is None else
-                  "Feedback received - changes" if r["Concern"].any() else
-                  "Feedback received - no MH change" if commented else
-                  "No comments received (original returned / not processed)")
+        tr = tracker.get(dept, {})
+        if commented:
+            status = "Feedback received - changes" if r["Concern"].any() else "Feedback received - no MH change"
+        elif tr.get("Received"):
+            status = f"Comments received {tr['Received']:%d-%b-%y} (tracker) - file not provided"
+        elif tr:
+            status = "No comments received (tracker)"
+        else:
+            status = "No feedback file"
         rec.append(dict(DeptCode=dept, Department=DEPARTMENTS[dept], Feedback_File=file,
-                        Feedback_Source=f["Feedback_Source"] if f is not None else "", Feedback_Status=status))
+                        Feedback_Source=f["Feedback_Source"] if f is not None else "", Feedback_Status=status,
+                        Tracker_Sent=tr.get("Sent"), Tracker_Received=tr.get("Received"),
+                        Feedback_Processed=commented))
     return pd.DataFrame(rec)
 
 
@@ -78,7 +112,10 @@ def department_summary(rows: pd.DataFrame, cells: pd.DataFrame, cap: pd.DataFram
               Net_Deviation=("Net_Change", "sum"), Changed_Cells=("Changed_Cells", "sum"),
               Concern_Items=("Concern", "sum"), Extension_MH=("Extension_MH", "sum"),
               Ambiguous_Cells=("Ambiguous_Cells", "sum"), Ambiguous_MH=("Ambiguous_MH", "sum"),
-              Unrequested_Gross=("Unrequested_Gross", "sum"), Unrequested_Net=("Unrequested_Net", "sum")).reset_index()
+              Unrequested_Gross=("Unrequested_Gross", "sum"), Unrequested_Net=("Unrequested_Net", "sum"),
+              BlankRetained_MH=("BlankRetained_MH", "sum"), Bridge_New_Work=("Bridge_New_Work", "sum"),
+              Bridge_Increase=("Bridge_Increase", "sum"), Bridge_Extension=("Bridge_Extension", "sum"),
+              Bridge_Reduction=("Bridge_Reduction", "sum"), Bridge_Removed=("Bridge_Removed", "sum")).reset_index()
     cr = rows[rows["Concern"]]
     s = s.merge(cr.groupby("DeptCode")["ProjectFull"].nunique().rename("Concern_Projects").reset_index(), on="DeptCode", how="left")
     for name, pat in [("New_Projects", "New Project"), ("New_Phase_Allocations", "New Phase Allocation"),
@@ -101,7 +138,66 @@ def department_summary(rows: pd.DataFrame, cells: pd.DataFrame, cap: pd.DataFram
         s[f"Avg_Utilisation_{scen}"] = s[f"{scen}_MH"] / months / s["Capacity_MH_per_Month"]
         s[f"Firm_Utilisation_{scen}"] = s[f"Firm_MH_{scen}"] / months / s["Capacity_MH_per_Month"]
         s[f"Peak_Utilisation_{scen}"] = s[f"Peak_Month_MH_{scen}"] / s["Capacity_MH_per_Month"]
+    capm = cap.set_index("DeptCode")["Capacity_MH_per_Month"]
+    for label, src in (("Overload_Months_Final", cat), ("Firm_Overload_Months_Final", firm)):
+        mm = src.groupby(["DeptCode", "Month"])["Final"].sum().reset_index()
+        mm = mm[mm["Final"] > mm["DeptCode"].map(capm)]
+        s = s.merge(mm.groupby("DeptCode").size().rename(label).reset_index(), on="DeptCode", how="left")
+        s[label] = s[label].fillna(0).astype(int)
     return s
+
+
+def company_peaks(mdf: pd.DataFrame, cap: pd.DataFrame) -> dict:
+    """Peak month and utilisation of the whole company per scenario."""
+    total_cap = cap["Capacity_MH_per_Month"].sum()
+    m = mdf.groupby("Month")[["Planning_MH", "Discipline_Final_MH", "Implemented_MH"]].sum()
+    out = {}
+    for col in m.columns:
+        mon = m[col].idxmax()
+        out[col] = {"Month": mon, "MH": float(m[col].max()), "Utilisation": float(m[col].max() / total_cap),
+                    "Months_Over": int((m[col] > total_cap).sum())}
+    return out
+
+
+def section_breakdown(rows: pd.DataFrame) -> pd.DataFrame:
+    """Sub-department totals for departments that hold several sections (5100: 5110-5160)."""
+    multi = rows.groupby("DeptCode")["SectionCode"].nunique()
+    r = rows[rows["DeptCode"].isin(multi[multi > 1].index) & (rows["P_Exists"] | rows["D_Exists"])]
+    g = r.groupby(["DeptCode", "SectionCode"]).agg(
+        Planning_MH=("P_Total", "sum"), Discipline_MH=("Final_Total", "sum"), Implemented_MH=("I_Total", "sum"),
+        Gross_Increase=("Gross_Increase", "sum"), Gross_Reduction=("Gross_Reduction", "sum"),
+        Net_Change=("Net_Change", "sum"), Concern_Items=("Concern", "sum")).reset_index()
+    return g
+
+
+def load_master(path: str | Path | None) -> pd.DataFrame:
+    """ENPPI project master (PROJECTS_my_db.xlsx): code -> name, client, category."""
+    if not path or not Path(path).exists():
+        return pd.DataFrame(columns=["Code", "Master_Name", "Master_Client", "Master_Category"])
+    m = pd.read_excel(path, usecols=["PROJECT_NO", "PROJECT_NAME", "CLIENT_SHORT_NAME", "PROJECT_CATEGORY"],
+                      dtype={"PROJECT_NO": str})
+    m["Code"] = m["PROJECT_NO"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+    return (m.rename(columns={"PROJECT_NAME": "Master_Name", "CLIENT_SHORT_NAME": "Master_Client",
+                              "PROJECT_CATEGORY": "Master_Category"})
+            [["Code", "Master_Name", "Master_Client", "Master_Category"]].drop_duplicates("Code"))
+
+
+def attach_master(df: pd.DataFrame, code_col: str, master: pd.DataFrame) -> pd.DataFrame:
+    """Add master name/client and a flag: not in master, internal/overhead account, or no code."""
+    out = df.copy()
+    base = out[code_col].astype(str).str.split("-").str[0]
+    out = out.merge(master.rename(columns={"Code": "_base"}), left_on=base, right_on="_base", how="left").drop(columns="_base")
+    if "key_0" in out.columns:
+        out = out.drop(columns="key_0")
+    flag = np.select(
+        [out[code_col].astype(str).str.startswith("UNCODED"),
+         base.values == INTERNAL_CODE,
+         out["Master_Name"].isna(),
+         out["Master_Category"].isin(["I", "O"]) | out["Master_Name"].fillna("").str.contains("DEVELOPMENT AND CUSTOMER", case=False)],
+        ["No project code", "Internal / unforeseen workload code", "Not in project master (new or proposal code)",
+         "Internal / overhead account used for project work"], "")
+    out["Master_Flag"] = flag
+    return out
 
 
 def monthly(cells: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
@@ -111,7 +207,7 @@ def monthly(cells: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
             .rename(columns={"P0": "Planning_MH", "Final": "Discipline_Final_MH", "I0": "Implemented_MH"}))
 
 
-def project_summary(rows: pd.DataFrame, cells: pd.DataFrame) -> pd.DataFrame:
+def project_summary(rows: pd.DataFrame, cells: pd.DataFrame, master: pd.DataFrame | None = None) -> pd.DataFrame:
     r = rows.copy()
     name = r["D_Name"].fillna(r["P_Name"]).fillna(r["I_Name"])
     r["Name"] = name
@@ -144,24 +240,47 @@ def project_summary(rows: pd.DataFrame, cells: pd.DataFrame) -> pd.DataFrame:
     p = p.merge((impl["W"] / impl["G"].replace(0, np.nan)).rename("Implementation_Rate").reset_index(), on="ProjectFull", how="left")
     p = p.fillna({"Depts_Concerned": 0, "Months_Affected": 0, "Departments_Raising": "", "Affected_Phases": "",
                   "Affected_Months": "", "Concern_Types": ""})
-    return severity(p).sort_values(["Severity_Points", "Gross_Increase"], ascending=False)
+    variants = r.groupby("ProjectFull")["Name"].apply(
+        lambda s: " | ".join(dict.fromkeys(re.sub(r"^[\d\s,\-]+", "", str(x)).strip()[:45] for x in s.dropna()))
+        if s.dropna().map(_norm_name).map(lambda n: n[:25]).nunique() > 1 else "")
+    p = p.merge(variants.rename("Title_Variants").reset_index(), on="ProjectFull", how="left")
+    if master is not None:
+        p = attach_master(p, "ProjectFull", master)
+    p = severity(p)
+    p["Gross_Change"] = p["Gross_Increase"] - p["Gross_Reduction"]
+    return p.sort_values(["Severity_Points", "Gross_Change", "Gross_Increase"], ascending=False)
 
 
 def copy_paste_check(df: pd.DataFrame) -> list[dict]:
-    """Feedback rows whose whole monthly profile repeats another row of the same file."""
+    """Feedback rows of different projects whose sequence of monthly values is the same, even when one is
+    shifted in time (1100-c: 5482100 and 8700100 repeat the tail of 5477100 from Mar-27)."""
     out = []
     d = df[(df["Scenario"] == "Discipline Comment") & df["SourceFile"].str.contains("-c", regex=False)]
     for fn, g in d.groupby("SourceFile"):
-        vec = g.pivot_table(index=["SourceRow", "ProjectFull", "ActivityName"], columns="Month", values="MH", aggfunc="sum").fillna(0)
-        vec = vec[vec.apply(lambda r: r[r > 0].nunique() >= 3, axis=1)]   # varied profile, not a flat rate
-        vec = vec[vec.sum(axis=1) >= 5000]
-        sig = vec.apply(lambda r: tuple(r.round(1)), axis=1)
-        for s, grp in vec.groupby(sig):
-            if len(grp) > 1 and grp.index.get_level_values(1).nunique() > 1:
-                desc = "; ".join(f"row {i[0]} {i[1]}" for i in grp.index)
+        vec = g.pivot_table(index=["SourceRow", "ProjectFull"], columns="Month", values="MH", aggfunc="sum").fillna(0)
+        nz = vec.apply(lambda r: tuple(r[r > 0].round(1)), axis=1)
+        keep = nz.map(len) >= 5
+        keep &= vec.sum(axis=1) >= 5000
+        keep &= nz.map(lambda t: len(set(t)) >= 3)         # varied profile, not a flat monthly rate
+        sig = nz[keep]
+        tails = {}
+        for idx, t in sig.items():
+            for k in range(0, len(t) - 4):                  # a row may repeat the tail of a longer row
+                tails.setdefault(t[k:], []).append(idx)
+        for idx, t in sig.items():
+            same = [j for j in tails.get(t, []) if j != idx and j[1] != idx[1]]
+            if same and idx[0] < min(j[0] for j in same + [idx]) + 10_000:
+                rows_ = sorted({idx, *same})
+                if rows_[0] != idx and idx not in [x for x in rows_[:1]]:
+                    pass
+                key = tuple(rows_)
+                if any(o.get("_key") == key for o in out):
+                    continue
                 out.append(dict(Severity="Medium", Area="Possible copy-paste", Scenario="Discipline Comment", File=fn,
-                                Issue="Different projects with identical 24-month profile",
-                                Detail=desc, Impact_MH=float(grp.sum(axis=1).iloc[0])))
+                                Issue="Different projects share the same monthly profile (possibly shifted) - confirm with the department",
+                                Detail="; ".join(f"row {r_} {c_}" for r_, c_ in rows_), Impact_MH=float(sum(t)), _key=key))
+    for o in out:
+        o.pop("_key", None)
     return out
 
 

@@ -36,7 +36,7 @@ NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 COLUMNS = [
     "Scenario", "ScenarioOrder", "DeptCode", "SectionCode", "Phase", "Category",
     "ProjectFull", "ProjectBase", "ProjectSuffix", "ActivityName", "Month", "MH", "IsBlank",
-    "ZeroOrBlankUnknown", "FontRed", "CellFill", "RowFill", "CellComment", "SourceFile",
+    "ZeroOrBlankUnknown", "FontRed", "CellFill", "RowFill", "CellComment", "Remark", "TypedCode", "SourceFile",
     "SourceRow", "SourceType",
 ]
 
@@ -169,7 +169,10 @@ def load_copilot_fact(xlsx: str | Path, issues: list[dict]) -> pd.DataFrame:
         out.append(cells)
     df = pd.concat(out, ignore_index=True)
     df["Month"] = df["Month"].dt.date
-    df["ActivityName"] = df["ActivityName"].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+    parts = df["ActivityName"].astype(str).str.partition("\n")
+    df["ActivityName"] = parts[0].str.replace(r"\s+", " ", regex=True).str.strip()
+    df["Remark"] = parts[2].str.replace(r"\s+", " ", regex=True).str.strip()
+    df["TypedCode"] = ""
     is_comment = df["Scenario"] == "Discipline Comment"
     df["ZeroOrBlankUnknown"] = is_comment & (df["MH"] == 0)
     df.loc[df["ZeroOrBlankUnknown"], "MH"] = float("nan")   # blank feedback = no revision
@@ -199,7 +202,8 @@ def load_workbook_folder(folder: str | Path, scenario: str, issues: list[dict]) 
             "ActivityName": d["activity"].str.replace(r"\s+", " ", regex=True).str.strip(),
             "Month": d["month"], "MH": d["value"], "IsBlank": d["value"].isna(),
             "ZeroOrBlankUnknown": False, "FontRed": d["font_red"], "CellFill": d["cell_fill"],
-            "RowFill": d["row_fill"], "CellComment": d["comment"], "SourceFile": d["file"],
+            "RowFill": d["row_fill"], "CellComment": d["comment"], "Remark": d["remark"],
+            "TypedCode": d["typed_code"], "SourceFile": d["file"],
             "SourceRow": d["row"], "SourceType": "Source workbook",
         }))
     if not frames:
@@ -215,6 +219,10 @@ def _finish(df: pd.DataFrame) -> pd.DataFrame:
     df["Category"] = df["Phase"]
     df.loc[(df["Phase"] == "Running") & (df["ProjectBase"] == INTERNAL_CODE), "Category"] = "Internal / Unforeseen"
     df["SourceRow"] = df["SourceRow"].astype(int)
+    # rows without any project code get a stable surrogate so they rank, chart and join like any project
+    unc = df["ProjectFull"].fillna("") == ""
+    df.loc[unc, "ProjectFull"] = "UNCODED-" + df.loc[unc, "DeptCode"].astype(str) + "-R" + df.loc[unc, "SourceRow"].astype(str)
+    df.loc[unc, "ProjectBase"] = df.loc[unc, "ProjectFull"]
     return df[COLUMNS]
 
 

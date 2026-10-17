@@ -124,6 +124,30 @@ def _pair_phase_moves(df: pd.DataFrame, issues: list[dict]) -> pd.DataFrame:
                            Issue="Projects found under a different phase in feedback (paired, baseline phase kept)",
                            Detail=f"{len(moves)} rows: " + "; ".join(moves[:12]) + (" ..." if len(moves) > 12 else ""),
                            Impact_MH=None))
+    # the after-implementation extract can lose phase headings (after/2600.xlsx has none), so pair its
+    # rows with the planning row of the same code in another phase in the same way
+    rows = df.drop_duplicates(["Scenario"] + KEY)[["Scenario"] + KEY]
+    p, i = rows[rows["Scenario"] == "Planning Input"], rows[rows["Scenario"] == "System Implementation"]
+    known = set(map(tuple, rows[rows["Scenario"] != "System Implementation"][KEY].values))
+    ik = set(map(tuple, i[KEY].values))
+    orphan_i = i[[tuple(x) not in known for x in i[KEY].values]]
+    free_p = p[[tuple(x) not in ik for x in p[KEY].values]]
+    paired: dict[str, list[str]] = {}
+    for _, ni in orphan_i.iterrows():
+        m = free_p[(free_p["DeptCode"] == ni.DeptCode) & (free_p["SectionCode"] == ni.SectionCode) &
+                   (free_p["ProjectKey"] == ni.ProjectKey) & (free_p["Phase"] != ni.Phase)]
+        if m.empty:
+            continue
+        mp = m.iloc[0]
+        free_p = free_p.drop(m.index[0])
+        sel = ((df["Scenario"] == "System Implementation") & (df["DeptCode"] == ni.DeptCode) &
+               (df["SectionCode"] == ni.SectionCode) & (df["Phase"] == ni.Phase) & (df["ProjectKey"] == ni.ProjectKey))
+        df.loc[sel, "Phase"] = mp.Phase
+        paired.setdefault(ni.DeptCode, []).append(f"{ni.ProjectKey}: {ni.Phase} -> {mp.Phase}")
+    for dept, moves in paired.items():
+        issues.append(dict(Severity="Medium", Area="After-implementation data", Scenario="System Implementation", File=dept,
+                           Issue="After rows filed under another phase (missing phase headings) - paired to planning by code",
+                           Detail="; ".join(moves), Impact_MH=None))
     return df
 
 
@@ -140,7 +164,8 @@ def three_way(df: pd.DataFrame, issues: list[dict]) -> tuple[pd.DataFrame, pd.Da
     srcrow = df.drop_duplicates(["Scenario"] + KEY).pivot_table(index=KEY, columns="Scenario", values="SourceRow", aggfunc="first")
     srcrow = srcrow.rename(columns={"Planning Input": "P_Row", "Discipline Comment": "D_Row", "System Implementation": "I_Row"})
     dmeta = (df[df["Scenario"] == "Discipline Comment"].groupby(KEY)
-             .agg(D_File=("SourceFile", "first"), D_SourceType=("SourceType", "first"), D_RowFill=("RowFill", "first"))
+             .agg(D_File=("SourceFile", "first"), D_SourceType=("SourceType", "first"), D_RowFill=("RowFill", "first"),
+                  D_Remark=("Remark", "max"), D_TypedCode=("TypedCode", "max"))
              )
     rows = attrs.set_index(KEY).join(names).join(srcrow).join(dmeta).reset_index()
     for c in ("P_Name", "D_Name", "I_Name"):
@@ -167,6 +192,7 @@ def three_way(df: pd.DataFrame, issues: list[dict]) -> tuple[pd.DataFrame, pd.Da
     marked = c["D_Red"].fillna(False).astype(bool) | c["D_Fill"].fillna("").ne("")
     c["AmbiguousBlank"] = (c["D_Exists"] & c["P_Exists"] & (c["P0"] > 0) & c["D"].isna() &
                            (c["D_Unknown"].fillna(False).astype(bool) | marked))
+    c["BlankRetained"] = c["D_Exists"] & c["P_Exists"] & (c["P0"] > 0) & c["D"].isna()
     c["AmbiguousReason"] = np.select(
         [c["AmbiguousBlank"] & c["D_Unknown"].fillna(False).astype(bool), c["AmbiguousBlank"]],
         ["Blank/zero indistinguishable in Copilot table - baseline retained",
@@ -201,12 +227,17 @@ def _classify_rows(rows: pd.DataFrame, c: pd.DataFrame, months: list) -> pd.Data
                 Gross_Increase=("Change", lambda x: x[x > 0].sum()), Gross_Reduction=("Change", lambda x: x[x < 0].sum()),
                 Net_Change=("Change", "sum"), Changed_Cells=("Changed", "sum"),
                 Ambiguous_Cells=("AmbiguousBlank", "sum"),
+                BlankRetained_MH=("P0", lambda x: 0.0),
                 Ambiguous_MH=("P0", lambda x: 0.0),
                 Unrequested_Gross=("Unrequested", lambda x: x.abs().sum()), Unrequested_Net=("Unrequested", "sum"),
                 Impl_Gap=("ImplGap", "sum")).reset_index()
     amb = c[c["AmbiguousBlank"]].groupby(KEY)["P0"].sum().rename("Ambiguous_MH_")
     agg = agg.drop(columns="Ambiguous_MH").merge(amb.reset_index(), on=KEY, how="left").rename(columns={"Ambiguous_MH_": "Ambiguous_MH"})
     agg["Ambiguous_MH"] = agg["Ambiguous_MH"].fillna(0.0)
+    blk = c[c["BlankRetained"]].groupby(KEY)["P0"].sum().rename("BlankRetained_MH_")
+    agg = agg.drop(columns="BlankRetained_MH").merge(blk.reset_index(), on=KEY, how="left").rename(
+        columns={"BlankRetained_MH_": "BlankRetained_MH"})
+    agg["BlankRetained_MH"] = agg["BlankRetained_MH"].fillna(0.0)
     w = c.assign(W=c["Change"].abs() * c["ImplShare"].fillna(0)).groupby(KEY).agg(W=("W", "sum")).reset_index()
     agg = agg.merge(w, on=KEY)
     agg["Impl_Ratio"] = np.where((agg["Gross_Increase"] - agg["Gross_Reduction"]) > 0,
@@ -248,6 +279,11 @@ def _classify_rows(rows: pd.DataFrame, c: pd.DataFrame, months: list) -> pd.Data
     tr = tr[tr["Transfer_MH"] > 0]
     tset = {(r.DeptCode, r.ProjectBase): r for r in tr.itertuples()}
 
+    typed = rows["D_TypedCode"].fillna("")
+    conflict = (typed != "") & (typed != rows["ProjectFull"]) & (typed.str.split("-").str[0] != rows["ProjectBase"])
+    rows.loc[conflict & (rows["CodeCorrection"].fillna("") == ""), "CodeCorrection"] = (
+        rows["ProjectFull"] + " -> " + typed + " (typed in column A)")
+    rows["CodeCorrection"] = rows["CodeCorrection"].fillna("")
     types, concern = [], []
     for r in rows.itertuples():
         t = []
@@ -260,6 +296,8 @@ def _classify_rows(rows: pd.DataFrame, c: pd.DataFrame, months: list) -> pd.Data
         elif r.P_Exists and r.D_Exists:
             if r.CodeCorrection:
                 t.append("Project Code Correction")
+            if r.D_Remark and not r.Changed_Cells and not r.CodeCorrection:
+                t.append("Description Change Only")
             if r.RequestedPhase:
                 t.append("Phase Transfer" if r.Changed_Cells else "Phase Label Change Only")
             if r.P_Total >= TOL and r.Final_Total < TOL and r.Changed_Cells:
@@ -287,24 +325,53 @@ def _classify_rows(rows: pd.DataFrame, c: pd.DataFrame, months: list) -> pd.Data
         if moved:
             t.append("Phase Transfer")
         types.append("; ".join(dict.fromkeys(t)))
+        if r.CodeCorrection and "Project Code Correction" not in t:
+            t.append("Project Code Correction")
         concern.append(bool(r.Changed_Cells) or (r.D_Exists and not r.P_Exists and r.Final_Total >= TOL)
-                       or (bool(r.RequestedPhase) and r.P_Exists and r.D_Exists and bool(r.Changed_Cells)))
+                       or (bool(r.CodeCorrection) and r.D_Exists) or (bool(r.RequestedPhase) and r.D_Exists))
     rows["Concern_Types"], rows["Concern"] = types, concern
     rows["Primary_Type"] = rows["Concern_Types"].str.split("; ").str[0].replace("", "No Change")
     rows["Known_In_Other_Depts"] = [(not r.P_Exists) and (r.ProjectBase in base_any) and
                                     ((r.DeptCode, r.ProjectBase) not in base_in_dept) for r in rows.itertuples()]
+    no_mh = (rows["Gross_Increase"] - rows["Gross_Reduction"]).abs() < TOL
     rows["Implementation_Status"] = np.select(
-        [rows["Concern"] & ~rows["I_Exists"],
+        [rows["Concern"] & no_mh,
+         rows["Concern"] & ~rows["I_Exists"],
          rows["Concern"] & (rows["Impl_Ratio"] >= 0.95),
          rows["Concern"] & (rows["Impl_Ratio"] >= 0.05),
          rows["Concern"],
          ~rows["Concern"] & (rows["Unrequested_Gross"] >= TOL) & rows["I_Exists"] & ~rows["P_Exists"] & ~rows["D_Exists"],
          ~rows["Concern"] & (rows["Unrequested_Gross"] >= TOL)],
-        ["Not implemented (row absent after implementation)", "Implemented", "Partially implemented",
+        ["Code or phase change - confirm in Primavera", "Not implemented (row absent after implementation)",
+         "Implemented", "Partially implemented",
          "Not implemented", "Added by Planning without comment", "Planner change without comment"], "No comment / no change")
     rows["Transfer_MH"] = [tset[(r.DeptCode, r.ProjectBase)].Transfer_MH if (r.DeptCode, r.ProjectBase) in tset and abs(r.Net_Change) >= TOL else 0.0
                            for r in rows.itertuples()]
+    # net-deviation bridge: every row's net change lands in exactly one bucket set, so the buckets add up to net
+    new = rows["D_Exists"] & ~rows["P_Exists"]
+    removed = rows["Concern_Types"].str.contains("Removed Allocation")
+    other = ~new & ~removed
+    rows["Bridge_New_Work"] = np.where(new, rows["Net_Change"], 0.0)
+    rows["Bridge_Removed"] = np.where(removed, rows["Net_Change"], 0.0)
+    rows["Bridge_Extension"] = np.where(other, rows["Extension_MH"] + rows["EarlyStart_MH"], 0.0)
+    rows["Bridge_Increase"] = np.where(other, rows["WithinSchedule_Increase"], 0.0)
+    rows["Bridge_Reduction"] = np.where(other, rows["WithinSchedule_Reduction"], 0.0)
+    rows["Brief_Categories"] = rows["Concern_Types"].map(brief_categories)
     return rows, tr
+
+
+# the brief's eleven concern categories; engine sub-types stay available as detail
+BRIEF_MAP = {"Increased MH": "Increased MH", "Reduced MH": "Reduced MH", "New Project": "New Project",
+             "New Project (code reused - verify)": "New Project", "New Phase Allocation": "New Phase Allocation",
+             "Phase Transfer": "Phase Transfer", "Phase Label Change Only": "Phase Transfer",
+             "Schedule Extension": "Schedule Extension", "Schedule Acceleration": "Schedule Acceleration",
+             "Earlier Start": "Schedule Acceleration", "Rescheduled (later start)": "Monthly Redistribution",
+             "Monthly Redistribution": "Monthly Redistribution", "Project Code Correction": "Project Code Correction",
+             "Removed Allocation": "Removed Allocation", "Description Change Only": "Description Change Only"}
+
+
+def brief_categories(types: str) -> str:
+    return "; ".join(dict.fromkeys(BRIEF_MAP[t] for t in str(types or "").split("; ") if t in BRIEF_MAP))
 
 
 def severity(projects: pd.DataFrame) -> pd.DataFrame:
@@ -312,7 +379,8 @@ def severity(projects: pd.DataFrame) -> pd.DataFrame:
     p = projects.copy()
     gross = p["Gross_Increase"] - p["Gross_Reduction"]
     pct = np.where(p["P_Total"] > 0, (p["Net_Change"] / p["P_Total"]).abs(), np.inf)
-    pts = (np.select([gross >= 20000, gross >= 10000, gross >= 5000, gross >= 2000, gross >= 500], [5, 4, 3, 2, 1], 0)
+    pts = (np.select([gross >= 50000, gross >= 20000, gross >= 10000, gross >= 5000, gross >= 2000, gross >= 500],
+                     [6, 5, 4, 3, 2, 1], 0)
            + np.select([~np.isfinite(pct), pct >= 0.5, pct >= 0.2], [2, 2, 1], 0)
            + np.select([p["Depts_Concerned"] >= 6, p["Depts_Concerned"] >= 4, p["Depts_Concerned"] >= 2], [3, 2, 1], 0)
            + np.select([p["Months_Affected"] >= 12, p["Months_Affected"] >= 6], [2, 1], 0)
