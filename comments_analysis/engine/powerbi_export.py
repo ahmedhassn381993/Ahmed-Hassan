@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +16,9 @@ from openpyxl.styles import Font
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from analysis import CATEGORY_ORDER, DEPARTMENTS, FIRM_CATEGORIES, HOURS_PER_MAN_MONTH
-from compare import KEY
+from compare import BRIEF_MAP, KEY
+
+PACKAGE = Path(__file__).resolve().parent.parent / "powerbi"     # queries, measures, theme and guide shipped with the data
 
 SCENARIOS = [("Planning Input", 1, "#2A78D6", "Man-hours distributed by Planning and sent to departments"),
              ("Discipline Comment", 2, "#EB6834", "Planning Input with populated, different department values applied (blank = retained)"),
@@ -36,7 +39,7 @@ def _client(name: str) -> str:
     return s.split(",")[0].strip()[:40] if "," in s else ""
 
 
-def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str, possible=None):
+def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str, possible=None, fb=None, inventory=None):
     folder.mkdir(parents=True, exist_ok=True)
     c = cells.copy()
     c["RowKey"] = _row_key(c)
@@ -69,9 +72,15 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
         "Implementation Rate": r["Impl_Ratio"], "Implemented Request MH": r["Implemented_Request_MH"],
         "Unrequested Change MH": r["Unrequested_Gross"], "Requested Phase": r["RequestedPhase"],
         "Code Correction": r["CodeCorrection"], "Months Changed": r["Months_Changed"],
-        "Blank Not Applied MH": r["Ambiguous_MH"], "Feedback File": r["D_File"], "Feedback Row": r["D_Row"]})
+        "Blank Not Applied MH": r["Ambiguous_MH"], "Feedback File": r["D_File"], "Feedback Row": r["D_Row"],
+        "Brief Categories": r["Brief_Categories"], "Department Remark": r["D_Remark"].fillna(""),
+        "Blank Retained MH": r["BlankRetained_MH"], "Bridge New Work MH": r["Bridge_New_Work"],
+        "Bridge Increase MH": r["Bridge_Increase"], "Bridge Extension MH": r["Bridge_Extension"],
+        "Bridge Reduction MH": r["Bridge_Reduction"], "Bridge Removed MH": r["Bridge_Removed"],
+        "Master Flag": r["Master_Flag"] if "Master_Flag" in r else ""})
     bridge = (items[["Cycle", "RowKey", "Concern Types"]].assign(ConcernType=items["Concern Types"].str.split("; "))
               .explode("ConcernType").query("ConcernType != ''").dropna()[["Cycle", "RowKey", "ConcernType"]])
+    bridge["Brief Category"] = bridge["ConcernType"].map(BRIEF_MAP).fillna("Other")
 
     ch = c[c["Changed"] | c["AmbiguousBlank"]].copy()
     cell_changes = pd.DataFrame({
@@ -87,11 +96,25 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
     capx = cap.copy()
     capx["DeptCode"] = capx["DeptCode"].astype(int)
     dim_dept = dim_dept.merge(capx.drop(columns=["HeadcountSource"]), on="DeptCode", how="left")
+    if fb is not None:
+        f = fb.assign(DeptCode=fb["DeptCode"].astype(int))[["DeptCode", "Feedback_Status", "Feedback_Processed",
+                                                             "Tracker_Sent", "Tracker_Received"]]
+        f = f.rename(columns={"Feedback_Status": "Feedback Status", "Feedback_Processed": "Feedback Processed",
+                              "Tracker_Sent": "Sent To Dept", "Tracker_Received": "Comments Received"})
+        f["Feedback Processed"] = f["Feedback Processed"].map({True: "Yes", False: "No"})
+        dim_dept = dim_dept.merge(f, on="DeptCode", how="left")
 
     names = r.assign(N=r["D_Name"].fillna(r["P_Name"]).fillna(r["I_Name"])).groupby("ProjectFull")["N"].agg(lambda s: max(s, key=len))
     dim_proj = pd.DataFrame({"ProjectCode": names.index, "Project Name": names.values})
     dim_proj["Base Code"] = dim_proj["ProjectCode"].str.split("-").str[0]
     dim_proj["Client"] = dim_proj["Project Name"].map(_client)
+    if "Master_Name" in ps:
+        m = ps.set_index("ProjectFull")[["Master_Name", "Master_Client", "Master_Category", "Master_Flag", "Title_Variants"]]
+        dim_proj = dim_proj.merge(m.rename(columns={"Master_Name": "Master Name", "Master_Client": "Master Client",
+                                                    "Master_Category": "Master Category", "Master_Flag": "Master Flag",
+                                                    "Title_Variants": "Title Variants"}),
+                                  left_on="ProjectCode", right_index=True, how="left")
+        dim_proj["Client"] = dim_proj["Master Client"].fillna(dim_proj["Client"])
     dim_proj["Project Label"] = dim_proj["ProjectCode"] + "  " + dim_proj["Project Name"].str.replace(r"^\s*[\d\-]+\s*", "", regex=True).str[:70]
     dim_proj = dim_proj.merge(sev[["Severity", "Severity_Points", "Depts_Concerned", "Departments_Raising"]]
                               .rename(columns={"Severity_Points": "Severity Points", "Depts_Concerned": "Depts Concerned",
@@ -114,12 +137,22 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
     dim_date["Period"] = ["Months %d-%d" % (6 * ((i - 1) // 6) + 1, 6 * ((i - 1) // 6) + 6) for i in dim_date["Month Index"]]
     dq = pd.DataFrame(issues)[["Severity", "Area", "Scenario", "File", "Issue", "Detail", "Impact_MH"]]
     dq["Detail"] = dq["Detail"].astype(str).str[:500]
+    dq.insert(0, "Cycle", cycle)
 
     for t in (items, bridge, cell_changes):
         t.insert(2, "CycleRowKey", t["Cycle"] + "|" + t["RowKey"])
+    # whole numbers stay whole in the CSV (no "62.0"), so Power Query's Int64 columns load cleanly
+    for t, cols in ((items, ["Feedback Row"]), (dim_proj, ["Severity Points", "Depts Concerned", "Severity Order"]),
+                    (dim_dept, ["Managers", "LoanTo_Unpaid", "Permanent", "Temporary", "Total", "Effective_Heads"])):
+        for col in cols:
+            if col in t:
+                t[col] = pd.to_numeric(t[col], errors="coerce").round().astype("Int64")
+    dim_dept.insert(len(dim_dept.columns), "As Of", dt.date.today())
     tables = {"FactWorkload": fact, "FactCommentItems": items, "FactCellChanges": cell_changes, "BridgeConcernType": bridge,
               "DimDepartment": dim_dept, "DimProject": dim_proj, "DimCategory": dim_cat, "DimScenario": dim_scen,
               "DimDate": dim_date, "DataQuality": dq}
+    if inventory is not None:
+        tables["FileInventory"] = inventory.assign(Cycle=cycle)
     if possible is not None and len(possible):
         tables["PossibleTransfers"] = possible.assign(Cycle=cycle)
     for name, t in tables.items():
@@ -147,4 +180,7 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
             for row in ws.iter_rows(min_row=2, min_col=mi, max_col=mi):
                 row[0].number_format = "mmm-yy"
     wb.save(folder / "Workload_Comments_PowerBI_Model.xlsx")
+    for name in ("queries.pq", "measures.dax", "ENPPI_Workload_Theme.json", "PowerBI_Build_Guide.md"):
+        if (PACKAGE / name).exists():
+            shutil.copy2(PACKAGE / name, folder / name)
     return tables

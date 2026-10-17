@@ -80,7 +80,7 @@ High Projects = CALCULATE ( [Projects with Concern], DimProject[Severity] = "Hig
 // [7 Labels and formatting helpers]
 Selected Department =
     IF ( HASONEVALUE ( DimDepartment[DeptCode] ), SELECTEDVALUE ( DimDepartment[Dept Label] ), "All departments" )
-As Of Label = "Cycle " & SELECTEDVALUE ( FactWorkload[Cycle], "multiple cycles" )
+As Of Label = "Cycle " & SELECTEDVALUE ( DimCycle[Cycle], "(select one cycle)" )
 // Use with Format > Conditional formatting > Field value on deviation visuals
 Deviation Colour =
     SWITCH ( TRUE (), [Disc vs Plan MH] > 0, "#EB6834", [Disc vs Plan MH] < 0, "#2A78D6", "#9E9E9E" )
@@ -90,3 +90,48 @@ Severity Colour =
 Implementation Colour =
     SWITCH ( TRUE (), ISBLANK ( [Implementation Rate] ), "#F2F2F2",
         [Implementation Rate] >= 0.95, "#C6EFCE", [Implementation Rate] >= 0.05, "#FFEB9C", "#FFC7CE" )
+
+// [8 Legacy workload %] - same definitions as the existing Forecast Comments PBIX, one set per scenario.
+// Run+Loan = Running + Loan To; Internal = Internal / Unforeseen; WL% = all categories; Projects Total% = firm.
+Run+Loan MH (Planning) = CALCULATE ( [Planning MH], DimCategory[Category] IN { "Running", "Loan To" } )
+Run+Loan MH (Discipline) = CALCULATE ( [Discipline MH], DimCategory[Category] IN { "Running", "Loan To" } )
+Run+Loan MH (Implemented) = CALCULATE ( [Implemented MH], DimCategory[Category] IN { "Running", "Loan To" } )
+Running+Loan% (Planning) = DIVIDE ( [Run+Loan MH (Planning)], [Capacity MH] )
+Running+Loan% (Discipline) = DIVIDE ( [Run+Loan MH (Discipline)], [Capacity MH] )
+Running+Loan% (Implemented) = DIVIDE ( [Run+Loan MH (Implemented)], [Capacity MH] )
+Internal% (Planning) = DIVIDE ( CALCULATE ( [Planning MH], DimCategory[Category] = "Internal / Unforeseen" ), [Capacity MH] )
+Internal% (Discipline) = DIVIDE ( CALCULATE ( [Discipline MH], DimCategory[Category] = "Internal / Unforeseen" ), [Capacity MH] )
+Internal% (Implemented) = DIVIDE ( CALCULATE ( [Implemented MH], DimCategory[Category] = "Internal / Unforeseen" ), [Capacity MH] )
+Signature% (Planning) = DIVIDE ( CALCULATE ( [Planning MH], DimCategory[Category] = "Under Signature" ), [Capacity MH] )
+Signature% (Discipline) = DIVIDE ( CALCULATE ( [Discipline MH], DimCategory[Category] = "Under Signature" ), [Capacity MH] )
+Signature% (Implemented) = DIVIDE ( CALCULATE ( [Implemented MH], DimCategory[Category] = "Under Signature" ), [Capacity MH] )
+Proposal% (Planning) = DIVIDE ( CALCULATE ( [Planning MH], DimCategory[Category] = "Proposal" ), [Capacity MH] )
+Proposal% (Discipline) = DIVIDE ( CALCULATE ( [Discipline MH], DimCategory[Category] = "Proposal" ), [Capacity MH] )
+Proposal% (Implemented) = DIVIDE ( CALCULATE ( [Implemented MH], DimCategory[Category] = "Proposal" ), [Capacity MH] )
+Potential% (Planning) = DIVIDE ( CALCULATE ( [Planning MH], DimCategory[Category] = "Potential Opportunity" ), [Capacity MH] )
+Potential% (Discipline) = DIVIDE ( CALCULATE ( [Discipline MH], DimCategory[Category] = "Potential Opportunity" ), [Capacity MH] )
+Potential% (Implemented) = DIVIDE ( CALCULATE ( [Implemented MH], DimCategory[Category] = "Potential Opportunity" ), [Capacity MH] )
+Case1% (Planning) = [Running+Loan% (Planning)] + [Internal% (Planning)]
+Case1% (Discipline) = [Running+Loan% (Discipline)] + [Internal% (Discipline)]
+Case1% (Implemented) = [Running+Loan% (Implemented)] + [Internal% (Implemented)]
+Projects Total% (Planning) = [Case1% (Planning)] + [Signature% (Planning)]
+Projects Total% (Discipline) = [Case1% (Discipline)] + [Signature% (Discipline)]
+Projects Total% (Implemented) = [Case1% (Implemented)] + [Signature% (Implemented)]
+WL% (Planning) = [Projects Total% (Planning)] + [Proposal% (Planning)] + [Potential% (Planning)]
+WL% (Discipline) = [Projects Total% (Discipline)] + [Proposal% (Discipline)] + [Potential% (Discipline)]
+WL% (Implemented) = [Projects Total% (Implemented)] + [Proposal% (Implemented)] + [Potential% (Implemented)]
+
+// [9 Bridge and coverage]
+Bridge New Work MH = SUM ( FactCommentItems[Bridge New Work MH] )
+Bridge Increase MH = SUM ( FactCommentItems[Bridge Increase MH] )
+Bridge Extension MH = SUM ( FactCommentItems[Bridge Extension MH] )
+Bridge Reduction MH = SUM ( FactCommentItems[Bridge Reduction MH] )
+Bridge Removed MH = SUM ( FactCommentItems[Bridge Removed MH] )
+Bridge Check MH =
+    [Bridge New Work MH] + [Bridge Increase MH] + [Bridge Extension MH] + [Bridge Reduction MH] + [Bridge Removed MH]
+        - [Net Change MH]
+Possible Transfer MH = SUM ( PossibleTransfers[Possible Offset MH] )
+Processed Planning MH = CALCULATE ( [Planning MH], DimDepartment[Feedback Processed] = "Yes" )
+Feedback Coverage % = DIVIDE ( [Processed Planning MH], [Planning MH] )
+Departments Processed = CALCULATE ( DISTINCTCOUNT ( DimDepartment[DeptCode] ), DimDepartment[Feedback Processed] = "Yes" )
+Capacity Line = IF ( ISBLANK ( [Capacity MH] ), BLANK (), 1 )

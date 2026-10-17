@@ -7,3 +7,5 @@ comments_analysis/output/
 *.csv
 __pycache__/
 *.pyc
+*.pbit
+*.png

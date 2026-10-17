@@ -96,6 +96,8 @@ def feedback_status(rows: pd.DataFrame, df: pd.DataFrame, tracker: dict | None =
             status = f"Comments received {tr['Received']:%d-%b-%y} (tracker) - file not provided"
         elif tr:
             status = "No comments received (tracker)"
+        elif file:
+            status = "Original returned - no comment file"
         else:
             status = "No feedback file"
         rec.append(dict(DeptCode=dept, Department=DEPARTMENTS[dept], Feedback_File=file,
@@ -286,11 +288,12 @@ def copy_paste_check(df: pd.DataFrame) -> list[dict]:
 
 def suggest_codes(rows: pd.DataFrame) -> pd.DataFrame:
     """For uncoded feedback rows, propose the closest coded project title in the dataset."""
-    known = rows[rows["ProjectFull"] != ""].copy()
+    uncoded = rows["ProjectFull"].str.startswith("UNCODED")
+    known = rows[~uncoded].copy()
     known["N"] = known["D_Name"].fillna(known["P_Name"]).fillna(known["I_Name"]).map(_norm_name)
     lib = known.drop_duplicates("ProjectFull")[["ProjectFull", "N"]]
     rec = []
-    for r in rows[rows["ProjectFull"] == ""].itertuples():
+    for r in rows[uncoded].itertuples():
         n = _norm_name(r.D_Name if isinstance(r.D_Name, str) else r.P_Name)
         best = max(((difflib.SequenceMatcher(None, n, x).ratio(), c) for c, x in zip(lib["ProjectFull"], lib["N"])), default=(0, ""))
         rec.append(dict(DeptCode=r.DeptCode, Phase=r.Phase, Activity=r.D_Name, Final_MH=r.Final_Total,
@@ -302,21 +305,36 @@ CHECKLIST_DEPTS = ["300", "600", "1100", "1180", "2100", "2110", "2200", "2220",
                    "2710", "2720", "2800", "3100", "3300", "3400", "3500", "4100", "5000", "5100"]
 
 
-def checklist(rows: pd.DataFrame, critical: list[tuple[str, str]]) -> pd.DataFrame:
+def checklist(rows: pd.DataFrame, critical: list[dict], fb: pd.DataFrame | None = None) -> pd.DataFrame:
     """Auto-fill the 'Critical Projects - Workload Forecast Comments Checklist' statuses."""
     r = rows.copy()
-    r["Dept4"] = r["DeptCode"].where(~r["DeptCode"].isin(["2410", "2420", "2430", "2440", "2450"]), "2400")
+    piping = ["2410", "2420", "2430", "2440", "2450"]
+    r["Dept4"] = r["DeptCode"].where(~r["DeptCode"].isin(piping), "2400")
+    fbs = {} if fb is None else dict(zip(fb["DeptCode"], fb["Feedback_Status"]))
+    fbs["2400"] = fbs.get("2410", "")
     out = []
-    for code, title in critical:
-        rec = {"Project No.": code, "Project Title": title}
-        sub = r[r["ProjectBase"] == str(code).split("-")[0]] if "-" not in str(code) else r[r["ProjectFull"] == str(code)]
+    for c in critical:
+        code = str(c["code"])
+        rec = {"Project No.": code, "Project Title": c["title"], "Client": c.get("client", ""),
+               "Planning Engineer": c.get("engineer", ""), "Planning Supervisor": c.get("supervisor", "")}
+        sub = r[r["ProjectBase"] == code.split("-")[0]] if "-" not in code else r[r["ProjectFull"] == code]
         for d in CHECKLIST_DEPTS:
+            st = fbs.get(d, "")
+            if st.startswith("Comments received") and "file not provided" in st:
+                rec[d] = "Comments received - file not provided"
+                continue
+            if st.startswith(("No comments received", "No feedback file")):
+                rec[d] = "Feedback not received"
+                continue
             x = sub[(sub["Dept4"] == d) & sub["Concern"]]
             if x.empty:
                 rec[d] = "No discipline comments"
                 continue
-            ratio = (x["Impl_Ratio"].fillna(0) * (x["Gross_Increase"] - x["Gross_Reduction"])).sum() / max(
-                (x["Gross_Increase"] - x["Gross_Reduction"]).sum(), 1e-9)
+            gross = (x["Gross_Increase"] - x["Gross_Reduction"]).sum()
+            if gross < TOL:
+                rec[d] = "Comments received - code / phase change (confirm in Primavera)"
+                continue
+            ratio = (x["Impl_Ratio"].fillna(0) * (x["Gross_Increase"] - x["Gross_Reduction"])).sum() / gross
             rec[d] = ("Comments received & implemented" if ratio >= 0.95 else
                       "Comments received & partially implemented" if ratio >= 0.05 else
                       "Comments received - not implemented (planner to confirm if not applicable)")

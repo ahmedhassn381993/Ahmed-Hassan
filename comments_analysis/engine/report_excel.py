@@ -3,11 +3,13 @@ register sheets) so totals stay traceable; registers hold the engine's row/cell-
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.chart import LineChart, Reference
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.marker import DataPoint
 from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.drawing.line import LineProperties
 from openpyxl.comments import Comment
@@ -95,8 +97,15 @@ RR_COLS = ["DeptCode", "Department", "SectionCode", "Phase", "Category", "Projec
            "Gross_Reduction", "Net_Change", "Changed_Cells", "Concern", "Primary_Type", "Concern_Types",
            "Extension_MH", "Ambiguous_Cells", "Ambiguous_MH", "Impl_Ratio", "Implementation_Status",
            "Unrequested_Gross", "Unrequested_Net", "RequestedPhase", "CodeCorrection", "Months_Changed",
-           "D_File", "D_Row", "P_Row", "I_Row", "Implemented_Request_MH", "Gross_Change"]
+           "D_File", "D_Row", "P_Row", "I_Row", "Implemented_Request_MH", "Gross_Change",
+           "Remark", "Brief_Categories", "BlankRetained_MH", "Bridge_New_Work", "Bridge_Increase", "Bridge_Extension",
+           "Bridge_Reduction", "Bridge_Removed", "Master_Name", "Master_Client", "Master_Flag"]
 RR = {c: L(i + 1) for i, c in enumerate(RR_COLS)}
+BRIDGE = [("Bridge_New_Work", "New work (new projects and phases)"),
+          ("Bridge_Increase", "Increase within the baseline schedule"),
+          ("Bridge_Extension", "Schedule extension / earlier start"),
+          ("Bridge_Reduction", "Reduction within the baseline schedule"),
+          ("Bridge_Removed", "Removed allocations")]
 
 
 def _row_register(wb, rows):
@@ -107,14 +116,19 @@ def _row_register(wb, rows):
     r["Activity"] = r["D_Name"].fillna(r["P_Name"]).fillna(r["I_Name"])
     r["Gross_Change"] = r["Gross_Increase"] - r["Gross_Reduction"]
     r["Implemented_Request_MH"] = np.where(r["Concern"], r["Impl_Ratio"].fillna(0) * r["Gross_Change"], 0.0)
+    r["Remark"] = r["D_Remark"].fillna("")
+    for c in ("Master_Name", "Master_Client", "Master_Flag"):
+        if c not in r:
+            r[c] = ""
     r = r.sort_values(["DeptCode", "SectionCode", "Phase", "ProjectFull"])[RR_COLS]
     _title(ws, "Row Register - one row per Department / Sub-department / Phase / Project",
            "Engine output (data sheet). Summary sheets read this sheet with SUMIFS / COUNTIFS.")
     fm = {c: MH for c in ["P_Total", "Final_Total", "I_Total", "Gross_Increase", "Gross_Reduction", "Net_Change",
                           "Extension_MH", "Ambiguous_MH", "Unrequested_Gross", "Unrequested_Net",
-                          "Implemented_Request_MH", "Gross_Change"]}
+                          "Implemented_Request_MH", "Gross_Change", "BlankRetained_MH"] + [b for b, _ in BRIDGE]}
     fm["Impl_Ratio"] = PCT
-    first, last = _write_table(ws, r, 4, fmts=fm, widths={"Activity": 50, "Concern_Types": 40, "Months_Changed": 30})
+    first, last = _write_table(ws, r, 4, fmts=fm, widths={"Activity": 50, "Concern_Types": 40, "Months_Changed": 30,
+                                                          "Remark": 50, "Master_Name": 40, "Master_Flag": 34})
     ws.freeze_panes = "I5"
     return first, last
 
@@ -165,7 +179,7 @@ def _capacity(wb, cap):
 
 
 # ----------------------------------------------------------------------------- summary sheets
-def _dept_ranking(wb, ds, rr_last, md_last, cap_last):
+def _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections=None):
     ws = wb["Department Ranking"]
     _title(ws, "Department Ranking - Planning Input vs Discipline Comment vs After Implementation",
            "Sorted by absolute net deviation. MH = man-hours over the 24-month window. Formulas read 'Row Register', "
@@ -176,14 +190,19 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last):
              "Phase Transfers / Moves", "Schedule Extensions", "Blank/zero not applied MH", "Requested Change MH",
              "Implemented of Request MH", "Implementation Rate", "Planner Change w/o Comment MH",
              "Effective Heads", "Capacity MH / Month", "Avg Utilisation - Planning", "Avg Utilisation - Discipline",
-             "Avg Utilisation - After Impl.", "Firm Utilisation - Discipline", "Rank by Concern Items"]
-    _header(ws, 4, 1, heads, height=48)
+             "Avg Utilisation - After Impl.", "Firm Utilisation - Discipline", "Rank by Concern Items",
+             "Rank by Deviation %", "Firm Overload Months - Discipline", "Overload Months incl. Pipeline - Discipline",
+             "All Blanks Retained MH"] + [lab for _, lab in BRIDGE]
+    ncol = len(heads)
+    _header(ws, 4, 1, heads, height=60)
     d = ds.assign(absnet=ds["Net_Deviation"].abs()).sort_values(["absnet", "Concern_Items"], ascending=False)
     R = "'Row Register'!"
     rng = lambda col: f"{R}${RR[col]}$5:${RR[col]}${rr_last}"
     first = 5
     last = first + len(d) - 1
     M = "'Monthly Data'!"
+    pct_cols = (10, 22, 26, 27, 28, 29)
+    mh_cols = (4, 5, 6, 7, 8, 9, 11, 19, 20, 21, 23, 25) + tuple(range(34, ncol + 1))
     for i, rec in enumerate(d.itertuples(), start=first):
         ws.cell(i, 1, int(rec.DeptCode))
         ws.cell(i, 2, rec.Department)
@@ -219,14 +238,22 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last):
                         for c in FIRM_CATEGORIES)
         ws.cell(i, 29, f'=IF(Y{i}=0,"-",({firm})/24/Y{i})')
         ws.cell(i, 30, f'=IF(M{i}=0,"-",RANK(M{i},$M${first}:$M${last}))')
-        for j in range(1, 31):
+        ws.cell(i, 31, f'=IF(I{i}=0,"-",RANK(J{i},$J${first}:$J${last}))')
+        ws.cell(i, 32, int(rec.Firm_Overload_Months_Final))
+        ws.cell(i, 33, int(rec.Overload_Months_Final))
+        ws.cell(i, 34, f"=SUMIFS({rng('BlankRetained_MH')},{rng('DeptCode')},{crit})")
+        for j, (col, _) in enumerate(BRIDGE, start=35):
+            ws.cell(i, j, f"=SUMIFS({rng(col)},{rng('DeptCode')},{crit})")
+        for j in range(1, ncol + 1):
             c = ws.cell(i, j)
             c.font, c.border = _f(), BOX
-            c.number_format = PCT if j in (10, 22, 26, 27, 28, 29) else (MH if j in (4, 5, 6, 7, 8, 9, 11, 19, 20, 21, 23, 25) else "General")
+            c.number_format = PCT if j in pct_cols else (MH if j in mh_cols else "General")
+        if not rec.Feedback_Processed:
+            ws.cell(i, 3).font = _f(italic=True, color="C00000")
     t = last + 1
     ws.cell(t, 1, "TOTAL")
     ws.cell(t, 2, "All departments")
-    for j in (4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25):
+    for j in (4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25) + tuple(range(34, ncol + 1)):
         ws.cell(t, j, f"=SUM({L(j)}{first}:{L(j)}{last})")
     ws.cell(t, 10, f"=IF(D{t}=0,0,I{t}/D{t})")
     ws.cell(t, 22, f'=IF(T{t}=0,"-",U{t}/T{t})')
@@ -235,12 +262,14 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last):
     ws.cell(t, 28, f'=IF(Y{t}=0,"-",F{t}/24/Y{t})')
     firm_all = "+".join(f'SUMIFS({M}$E$5:$E${md_last},{M}$B$5:$B${md_last},"{c}")' for c in FIRM_CATEGORIES)
     ws.cell(t, 29, f'=IF(Y{t}=0,"-",({firm_all})/24/Y{t})')
-    for j in range(1, 31):
+    for j in range(1, ncol + 1):
         c = ws.cell(t, j)
         c.font, c.border, c.fill = _f(bold=True), BOX, _fill("DDEBF7")
-        c.number_format = PCT if j in (10, 22, 26, 27, 28, 29) else (MH if j not in (1, 2, 3) else "General")
+        c.number_format = PCT if j in pct_cols else (MH if j not in (1, 2, 3) else "General")
+    ws.cell(t + 1, 2, "Bridge check (bridge columns minus net deviation, should be 0)").font = _f(italic=True, color=MUTED)
+    ws.cell(t + 1, 9, f"=SUM({L(35)}{t}:{L(ncol)}{t})-I{t}").number_format = MH
     widths = {1: 7, 2: 30, 3: 30}
-    for j in range(1, 31):
+    for j in range(1, ncol + 1):
         ws.column_dimensions[L(j)].width = widths.get(j, 13)
     ws.freeze_panes = "D5"
     lim = float(max(1.0, d["Net_Deviation"].abs().max()))
@@ -248,40 +277,67 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last):
     for col in ("Z", "AA", "AB", "AC"):
         ws.conditional_formatting.add(f"{col}{first}:{col}{last}", CellIsRule(operator="greaterThan", formula=["1"],
                                       font=Font(name=FONT, bold=True, color="C00000")))
+    _note(ws, "C4", "Red italic = no comment file was available for this department, so its original is used with no change "
+                    "(status from the workflow tracker where provided).")
     _note(ws, "N4", "Distinct project codes with at least one concern row (engine-computed distinct count).")
     _note(ws, "S4", "Baseline MH where feedback was blank but marked red/highlighted, or where the Copilot table "
                     "cannot distinguish blank from zero. Retained per rule 'blank = no revision'; verify with the department.")
     _note(ws, "W4", "Absolute MH changed in the after-implementation data where the department requested no change.")
     _note(ws, "AC4", "Running + Internal + Loan To + Under Signature (pipeline excluded), as the PBIX 'Projects Total%' measure.")
-    ws.cell(t + 2, 1, "Utilisation = workload MH per month / (effective heads x 150 MH). Values above 100% are bold red. "
-                      "Deviation colour: blue = reduction, orange = increase.").font = _f(color=MUTED, italic=True)
+    _note(ws, "AF4", "Months in the window where firm discipline-adjusted workload exceeds the department's monthly capacity.")
+    _note(ws, f"{L(35)}4", "Net deviation bridge: the five bridge columns add up to Net Deviation for every department.")
+    row = t + 3
+    ws.cell(row, 1, "Utilisation = workload MH per month / (effective heads x 150 MH). Values above 100% are bold red. "
+                    "Deviation colour: blue = reduction, orange = increase.").font = _f(color=MUTED, italic=True)
+    if sections is not None and len(sections):
+        row += 2
+        ws.cell(row, 1, "Sub-department breakdown (departments with several sections)").font = Font(name=FONT, bold=True, size=11, color=NAVY)
+        _header(ws, row + 1, 1, ["Dept", "Sub-dept", "Planning Input MH", "Discipline-adjusted MH", "After Implementation MH",
+                                 "Gross Increase", "Gross Reduction", "Net Deviation", "Deviation %", "Concern Items"], height=36)
+        for k, rec in enumerate(sections.sort_values(["DeptCode", "SectionCode"]).itertuples(), start=row + 2):
+            ws.cell(k, 1, int(rec.DeptCode))
+            ws.cell(k, 2, str(rec.SectionCode))
+            crit = f"{rng('DeptCode')},$A{k},{rng('SectionCode')},$B{k}"
+            for j, col in ((3, "P_Total"), (4, "Final_Total"), (5, "I_Total"), (6, "Gross_Increase"), (7, "Gross_Reduction")):
+                ws.cell(k, j, f"=SUMIFS({rng(col)},{crit})")
+            ws.cell(k, 8, f"=F{k}+G{k}")
+            ws.cell(k, 9, f"=IF(C{k}=0,0,H{k}/C{k})")
+            ws.cell(k, 10, f'=COUNTIFS({crit},{rng("Concern")},"Yes")')
+            for j in range(1, 11):
+                c = ws.cell(k, j)
+                c.font, c.border = _f(), BOX
+                c.number_format = PCT if j == 9 else (MH if 3 <= j <= 8 else "General")
     return first, last, t
 
 
 def _project_ranking(wb, ps, rr_last):
     ws = wb["Project Ranking"]
     _title(ws, "Project Ranking - departmental concern by project",
-           "Severity points are formulas (see 'Method & Assumptions'). MH sums read 'Row Register'.")
-    p = ps[ps["Concern_Rows"] > 0].copy()
+           "Severity points are formulas (see 'Method & Assumptions'); ties rank by gross change. MH sums read 'Row Register'. "
+           "Projects without any concern are listed last as 'No Concern'.")
+    p = ps.copy()
     heads = ["Rank", "Project Code", "Base Code", "Project Name", "Severity", "Severity Points", "Depts Concerned",
              "Departments Raising", "Planning Input MH", "Discipline-adjusted MH", "After Implementation MH",
              "Gross Increase", "Gross Reduction", "Net Deviation", "Net %", "Months Affected", "Affected Months",
-             "Affected Phases", "Concern Types", "New Allocation", "Schedule Extension", "Implementation Rate"]
+             "Affected Phases", "Concern Types", "New Allocation", "Schedule Extension", "Implementation Rate",
+             "Concern Rows", "Gross Change", "Project Master Name", "Master Client", "Master Check", "Title Variants"]
+    ncol = len(heads)
     _header(ws, 4, 1, heads, height=40)
     R = "'Row Register'!"
     rng = lambda col: f"{R}${RR[col]}$5:${RR[col]}${rr_last}"
     first, last = 5, 4 + len(p)
+    txt = lambda v: "" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)
     for i, rec in enumerate(p.itertuples(), start=first):
-        ws.cell(i, 1, f"=RANK(F{i},$F${first}:$F${last})")
+        ws.cell(i, 1, f"=RANK(F{i},$F${first}:$F${last})+COUNTIFS($F${first}:$F${last},F{i},$X${first}:$X${last},\">\"&X{i})")
         ws.cell(i, 2, rec.ProjectFull)
         ws.cell(i, 3, rec.Project_Base)
-        ws.cell(i, 4, rec.Project_Name[:120])
-        ws.cell(i, 5, f'=IF(F{i}>=10,"Critical",IF(F{i}>=7,"High",IF(F{i}>=4,"Medium","Low")))')
-        g = f"(L{i}-M{i})"
-        ws.cell(i, 6, f"=IF({g}>=20000,5,IF({g}>=10000,4,IF({g}>=5000,3,IF({g}>=2000,2,IF({g}>=500,1,0)))))"
+        ws.cell(i, 4, re.sub(r"^[\d\s,\-]+", "", str(rec.Project_Name)).strip()[:120])
+        ws.cell(i, 5, f'=IF(W{i}=0,"No Concern",IF(F{i}>=10,"Critical",IF(F{i}>=7,"High",IF(F{i}>=4,"Medium","Low"))))')
+        g = f"X{i}"
+        ws.cell(i, 6, f"=IF(W{i}=0,0,IF({g}>=50000,6,IF({g}>=20000,5,IF({g}>=10000,4,IF({g}>=5000,3,IF({g}>=2000,2,IF({g}>=500,1,0))))))"
                       f"+IF(I{i}<=0,2,IF(ABS(N{i})/I{i}>=0.5,2,IF(ABS(N{i})/I{i}>=0.2,1,0)))"
                       f"+IF(G{i}>=6,3,IF(G{i}>=4,2,IF(G{i}>=2,1,0)))+IF(P{i}>=12,2,IF(P{i}>=6,1,0))"
-                      f'+IF(T{i}="Yes",1,0)+IF(U{i}="Yes",1,0)')
+                      f'+IF(T{i}="Yes",1,0)+IF(U{i}="Yes",1,0))')
         ws.cell(i, 7, int(rec.Depts_Concerned))
         ws.cell(i, 8, rec.Departments_Raising)
         crit = f"$B{i}"
@@ -295,19 +351,29 @@ def _project_ranking(wb, ps, rr_last):
         ws.cell(i, 19, rec.Concern_Types)
         ws.cell(i, 20, "Yes" if rec.Has_New_Allocation else "No")
         ws.cell(i, 21, "Yes" if rec.Has_Extension else "No")
-        ws.cell(i, 22, f'=IF((L{i}-M{i})=0,"-",SUMIFS({rng("Implemented_Request_MH")},{rng("ProjectFull")},{crit})/(L{i}-M{i}))')
-        for j in range(1, 23):
+        ws.cell(i, 22, f'=IF(X{i}=0,"-",SUMIFS({rng("Implemented_Request_MH")},{rng("ProjectFull")},{crit})/X{i})')
+        ws.cell(i, 23, f'=COUNTIFS({rng("ProjectFull")},{crit},{rng("Concern")},"Yes")')
+        ws.cell(i, 24, f"=L{i}-M{i}")
+        ws.cell(i, 25, txt(getattr(rec, "Master_Name", "")))
+        ws.cell(i, 26, txt(getattr(rec, "Master_Client", "")))
+        ws.cell(i, 27, txt(getattr(rec, "Master_Flag", "")))
+        ws.cell(i, 28, txt(getattr(rec, "Title_Variants", "")))
+        for j in range(1, ncol + 1):
             c = ws.cell(i, j)
             c.font, c.border = _f(), BOX
-            c.number_format = PCT if j in (15, 22) else (MH if j in (9, 10, 11, 12, 13, 14) else "General")
+            c.number_format = PCT if j in (15, 22) else (MH if j in (9, 10, 11, 12, 13, 14, 24) else "General")
     for sev, col in SEV_FILL.items():
         ws.conditional_formatting.add(f"E{first}:E{last}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(col),
                                       font=Font(name=FONT, bold=True, color="FFFFFF" if sev == "Critical" else INK)))
-    widths = {1: 6, 2: 12, 3: 10, 4: 48, 5: 10, 6: 9, 7: 9, 8: 30, 17: 18, 18: 26, 19: 46}
-    for j in range(1, 23):
+    ws.conditional_formatting.add(f"AA{first}:AA{last}", FormulaRule(formula=[f'LEFT(AA{first},8)="Internal"'],
+                                  font=Font(name=FONT, bold=True, color="C00000")))
+    widths = {1: 6, 2: 12, 3: 10, 4: 48, 5: 10, 6: 9, 7: 9, 8: 30, 17: 18, 18: 26, 19: 46, 25: 40, 26: 12, 27: 30, 28: 50}
+    for j in range(1, ncol + 1):
         ws.column_dimensions[L(j)].width = widths.get(j, 13)
     ws.freeze_panes = "E5"
-    ws.auto_filter.ref = f"A4:V{last}"
+    ws.auto_filter.ref = f"A4:{L(ncol)}{last}"
+    _note(ws, "AA4", "Check against the ENPPI project master (PROJECTS_my_db.xlsx): blank = code found; otherwise the code is "
+                     "missing from the master, has no code, or is an internal / overhead account (e.g. Business Development).")
     return first, last
 
 
@@ -359,6 +425,16 @@ def _monthly_impact(wb, months, md_last, cap_last, dev_lim):
             c.font, c.border, c.number_format = _f(bold=True, color="FFFFFF"), BOX, MH
             c.fill = _fill(NAVY)
         total_rows[label] = row
+        row += 1
+        ws.cell(row, 1, label)
+        ws.cell(row, 2, "memo: Running incl. Internal")
+        top = row - 1 - len(CATEGORY_ORDER)
+        for j in range(3, tot_col + 1):
+            ws.cell(row, j, f"={L(j)}{top}+{L(j)}{top + 1}")
+        for j in range(1, tot_col + 1):
+            c = ws.cell(row, j)
+            c.font, c.border, c.number_format = _f(italic=True), BOX, MH
+            c.fill = _fill(CAT_FILL["Running"])
         row += 2
     p, d, i = total_rows["Planning Input"], total_rows["Discipline-adjusted"], total_rows["After Implementation"]
     lines = [("Deviation", "Discipline - Planning", lambda c: f"={c}{d}-{c}{p}"),
@@ -472,12 +548,15 @@ def _deviation_register(wb, rows, ps):
         "Net %": None, "Months Changed": r["Months_Changed"], "Concern Types": r["Concern_Types"],
         "Concern": r["Concern"], "Project Severity": r["Project Severity"], "Implementation Status": r["Implementation_Status"],
         "Implementation Rate": r["Impl_Ratio"], "Requested Phase": r["RequestedPhase"], "Code Correction": r["CodeCorrection"],
-        "Blank/zero not applied MH": r["Ambiguous_MH"], "Feedback File": r["D_File"], "Feedback Row": r["D_Row"]})
+        "Blank/zero not applied MH": r["Ambiguous_MH"], "Feedback File": r["D_File"], "Feedback Row": r["D_Row"],
+        "Brief Categories": r["Brief_Categories"], "Department Remark": r["D_Remark"].fillna(""),
+        "Master Check": r["Master_Flag"] if "Master_Flag" in r else ""})
     fm = {c: MH for c in ["Planning Input MH", "Discipline-adjusted MH", "After Impl. MH", "Gross Increase",
                           "Gross Reduction", "Net Deviation", "Blank/zero not applied MH"]}
     fm.update({"Net %": PCT, "Implementation Rate": PCT})
     first, last = _write_table(ws, out, 4, fmts=fm, widths={"Activity (department wording)": 50, "Concern Types": 40,
-                                                              "Months Changed": 28, "Department": 26, "Implementation Status": 28})
+                                                              "Months Changed": 28, "Department": 26, "Implementation Status": 28,
+                                                              "Brief Categories": 34, "Department Remark": 60, "Master Check": 32})
     for i in range(first, last + 1):
         ws.cell(i, 14, f'=IF(H{i}<=0,"New",M{i}/H{i})').number_format = PCT
     for sevname, col in SEV_FILL.items():
@@ -511,7 +590,7 @@ def _cell_changes(wb, cells, rows):
     return len(out)
 
 
-def _new_projects(wb, rows):
+def _new_projects(wb, rows, issues=()):
     ws = wb["New Projects Register"]
     _title(ws, "New Projects Register - allocations that exist only in department feedback",
            "'Known in other departments' = the project code exists in another department's baseline.")
@@ -525,13 +604,31 @@ def _new_projects(wb, rows):
         "Departments Requesting Same Code": r["ProjectFull"].map(raised),
         "Known in Other Depts' Baseline": r["Known_In_Other_Depts"], "In After-Implementation Data": r["I_Exists"],
         "After Implementation MH": r["I_Total"], "Implementation Status": r["Implementation_Status"],
-        "Feedback File": r["D_File"], "Row": r["D_Row"]})
+        "Feedback File": r["D_File"], "Row": r["D_Row"], "Master Check": r["Master_Flag"] if "Master_Flag" in r else "",
+        "Data Quality Note": [_dq_note(code, dept, issues) for code, dept in zip(r["ProjectFull"], r["DeptCode"])],
+        "Department Remark": r["D_Remark"].fillna("")})
     out["First Month"] = [dt.datetime.combine(m, dt.time()) if m is not None and not pd.isna(m) else None for m in out["First Month"]]
     out["Last Month"] = [dt.datetime.combine(m, dt.time()) if m is not None and not pd.isna(m) else None for m in out["Last Month"]]
     _write_table(ws, out, 4, fmts={"Requested MH (24 m)": MH, "After Implementation MH": MH, "First Month": MON, "Last Month": MON},
-                 widths={"Activity (department wording)": 55, "Department": 26, "Implementation Status": 34})
+                 widths={"Activity (department wording)": 55, "Department": 26, "Implementation Status": 34,
+                         "Master Check": 32, "Data Quality Note": 60, "Department Remark": 50})
     ws.freeze_panes = "C5"
     return len(out)
+
+
+BUSINESS_RISKS = ("Possible transfer", "Phase transfer", "Duplicate project row", "Project code", "Possible copy-paste",
+                  "Project master")
+
+
+def _dq_note(code: str, dept: str, issues) -> str:
+    """Business data-quality notes that mention this project code (copy-paste, reused code, master check)."""
+    notes = []
+    for i in issues:
+        if i["Area"] in BUSINESS_RISKS and i["Area"] != "Phase transfer" and code and code in str(i["Detail"]):
+            if i["Area"] == "Duplicate project row" and str(dept) not in str(i["File"]):
+                continue
+            notes.append(f"{i['Area']}: {i['Issue']}")
+    return "; ".join(dict.fromkeys(notes))
 
 
 def _phase_and_schedule(wb, rows, transfers, issues, possible=None):
@@ -548,6 +645,21 @@ def _phase_and_schedule(wb, rows, transfers, issues, possible=None):
     _, row = _write_table(ws, a, row + 1, fmts={c: MH for c in ["Planning MH", "Discipline-adjusted MH", "Net Change",
                                                               "MH that would be double counted if not paired"]},
                           widths={"Activity": 50}, autofilter=False)
+    row += 2
+    ws.cell(row, 1, "A2. Project code corrections and code transfers by departments").font = Font(name=FONT, bold=True, size=11, color=NAVY)
+    cc = rows[rows["CodeCorrection"] != ""]
+    if len(cc):
+        a2 = pd.DataFrame({"Dept": cc["DeptCode"].astype(int), "Phase": cc["Phase"], "Code Change": cc["CodeCorrection"],
+                           "Activity": cc["D_Name"], "Planning MH": cc["P_Total"], "Discipline-adjusted MH": cc["Final_Total"],
+                           "Net Change": cc["Net_Change"], "Treatment": np.where(
+                               cc["CodeCorrection"].str.contains("typed in column A"),
+                               "Code typed in column A differs from the activity code - activity code kept; confirm the code",
+                               "Paired with the baseline row (same title) - compared like-for-like, not counted as new work")})
+        _, row = _write_table(ws, a2, row + 1, fmts={c: MH for c in ["Planning MH", "Discipline-adjusted MH", "Net Change"]},
+                              widths={"Activity": 50}, autofilter=False)
+    else:
+        row += 1
+        ws.cell(row, 1, "None found.").font = _f(italic=True, color=MUTED)
     row += 2
     ws.cell(row, 1, "B. Reduction in one phase with increase in another (same department, same base project)").font = Font(name=FONT, bold=True, size=11, color=NAVY)
     if len(transfers):
@@ -579,9 +691,9 @@ def _phase_and_schedule(wb, rows, transfers, issues, possible=None):
     _, row = _write_table(ws, c, row + 1, fmts={"MH Beyond Baseline Finish": MH, "MH Before Baseline Start": MH, "Net Change": MH},
                           widths={"Activity": 46, "Types": 40, "Implementation Status": 28}, autofilter=False)
     row += 2
-    ws.cell(row, 1, "D. Double-counting risk register").font = Font(name=FONT, bold=True, size=11, color=NAVY)
-    risk = [i for i in issues if i["Area"] in ("Double counting", "Copilot model", "Phase transfer", "Possible transfer",
-                                               "Duplicate project row", "Project code", "Possible copy-paste")]
+    ws.cell(row, 1, "D. Double-counting and coding risks in the department feedback (Copilot-model defects are in the "
+                    "Data Quality Log)").font = Font(name=FONT, bold=True, size=11, color=NAVY)
+    risk = [i for i in issues if i["Area"] in BUSINESS_RISKS]
     dd = pd.DataFrame(risk)[["Severity", "Area", "Scenario", "File", "Issue", "Detail", "Impact_MH"]] if risk else pd.DataFrame()
     if len(dd):
         _write_table(ws, dd, row + 1, fmts={"Impact_MH": MH}, widths={"Issue": 50, "Detail": 90}, autofilter=False)
@@ -644,38 +756,46 @@ def _implementation(wb, rows, rr_last):
     ws.freeze_panes = "C5"
 
 
+CHK_COLORS = [("Comments received & implemented", "C6EFCE"), ("Comments received & partially implemented", "FFEB9C"),
+              ("Comments received - not implemented (planner to confirm if not applicable)", "FFC7CE"),
+              ("Comments received - code / phase change (confirm in Primavera)", "E4DFEC"),
+              ("Comments received - file not provided", "BDD7EE"), ("Feedback not received", "BFBFBF"),
+              ("No discipline comments", "F2F2F2")]
+
+
 def _checklist(wb, chk):
     ws = wb["Comments Checklist"]
     _title(ws, "Critical Projects - Workload Forecast Comments Checklist (auto-filled)",
            "Same layout as the planners' checklist. 'Not implemented' items need the planner to confirm "
-           "'Comments received but not applicable' or implement.")
-    depts = [c for c in chk.columns if c not in ("Project No.", "Project Title")]
-    _header(ws, 4, 1, ["Sr.", "Project No.", "Project Title"] + [f"{d}\n{DEPARTMENTS.get(d, 'Piping Division (2410-2450)')}" for d in depts], height=80)
-    colors = {"Comments received & implemented": "C6EFCE", "Comments received & partially implemented": "FFEB9C",
-              "No discipline comments": "F2F2F2"}
+           "'Comments received but not applicable' or implement. Grey = no feedback was received or processed for that department.")
+    fixed = ["Project No.", "Project Title", "Client", "Planning Engineer", "Planning Supervisor"]
+    depts = [c for c in chk.columns if c not in fixed]
+    nf = len(fixed) + 1
+    _header(ws, 4, 1, ["Sr."] + fixed + [f"{d}\n{DEPARTMENTS.get(d, 'Piping Division (2410-2450)')}" for d in depts], height=80)
+    colors = dict(CHK_COLORS)
     for i, rec in enumerate(chk.itertuples(index=False), start=5):
         ws.cell(i, 1, i - 4)
-        ws.cell(i, 2, str(rec[0]))
-        ws.cell(i, 3, rec[1])
-        for j, v in enumerate(rec[2:], start=4):
+        for j, v in enumerate(rec[:len(fixed)], start=2):
+            ws.cell(i, j, str(v) if j == 2 else v)
+        for j, v in enumerate(rec[len(fixed):], start=nf + 1):
             c = ws.cell(i, j, v)
             c.fill = _fill(colors.get(v, "FFC7CE"))
             c.alignment = Alignment(wrap_text=True, vertical="center")
-        for j in range(1, 4 + len(depts)):
+        for j in range(1, nf + 1 + len(depts)):
             ws.cell(i, j).font, ws.cell(i, j).border = _f(size=8), BOX
+        for j in range(2, nf + 1):
+            ws.cell(i, j).alignment = Alignment(wrap_text=True, vertical="center")
         ws.row_dimensions[i].height = 42
-    ws.column_dimensions["A"].width = 5
-    ws.column_dimensions["B"].width = 11
-    ws.column_dimensions["C"].width = 40
-    for j in range(4, 4 + len(depts)):
+    for col, w in zip("ABCDEF", (5, 11, 40, 10, 22, 16)):
+        ws.column_dimensions[col].width = w
+    for j in range(nf + 1, nf + 1 + len(depts)):
         ws.column_dimensions[L(j)].width = 14
     lr = 6 + len(chk)
-    for k, (label, col) in enumerate([("Comments received & implemented", "C6EFCE"), ("Comments received & partially implemented", "FFEB9C"),
-                                      ("Comments received - not implemented (planner to confirm if not applicable)", "FFC7CE"),
-                                      ("No discipline comments", "F2F2F2")]):
+    ws.cell(lr - 1, 3, "Legend").font = _f(bold=True)
+    for k, (label, col) in enumerate(CHK_COLORS):
         ws.cell(lr + k, 3, label).fill = _fill(col)
         ws.cell(lr + k, 3).font = _f()
-    ws.freeze_panes = "D5"
+    ws.freeze_panes = L(nf + 1) + "5"
 
 
 def _dq(wb, inventory, issues):
@@ -683,7 +803,8 @@ def _dq(wb, inventory, issues):
     _title(ws, "Data Quality, Missing Files and Corrections Log",
            "Every correction the engine made to reach the figures in this workbook, and every gap that needs action.")
     ws.cell(4, 1, "A. File inventory (26 departments x 3 scenarios)").font = Font(name=FONT, bold=True, size=11, color=NAVY)
-    _, last = _write_table(ws, inventory, 5, autofilter=False, widths={"Action Needed": 60, "Department": 30})
+    _, last = _write_table(ws, inventory, 5, autofilter=False, widths={"Action Needed": 70, "Department": 30},
+                           fmts={"Sent to Dept": "dd-mmm-yy", "Comments Received": "dd-mmm-yy"})
     row = last + 3
     ws.cell(row, 1, "B. Issues and corrections").font = Font(name=FONT, bold=True, size=11, color=NAVY)
     iss = pd.DataFrame(issues)[["Severity", "Area", "Scenario", "File", "Issue", "Detail", "Impact_MH"]]
@@ -696,38 +817,61 @@ def _dq(wb, inventory, issues):
 def _method(wb, meta):
     ws = wb["Method & Assumptions"]
     _title(ws, "Method, Rules and Assumptions")
-    lines = [
-        ("Sources", meta["sources"]),
+    n_dir, n_cop = meta.get("n_direct_feedback", 0), meta.get("n_copilot_feedback", 0)
+    lines = [("Sources", s.strip()) for s in meta["sources"].split(" | ")]
+    lines += [
         ("Comparison window", meta["window"]),
         ("Match key", "Department + Sub-department + Phase + full Project code (+ occurrence when a code repeats) + Month. "
                       "Full codes are taken from the activity text because the template's =LEFT(B,7) formula truncates "
-                      "8-digit and suffixed codes (40061420 -> 4006142; 5020250-7 -> 5020250)."),
+                      "8-digit and suffixed codes (40061420 -> 4006142; 5020250-7 -> 5020250). Rows without a code get a "
+                      "stable key 'UNCODED-<dept>-<title hash>'."),
         ("Rule 1 - blank feedback", "Final = Planning Input; deviation 0; no concern. Blank is never treated as zero."),
         ("Rule 2 - equal value", "Final = Planning Input; deviation 0; no concern."),
         ("Rule 3 - populated & different", "Final = feedback value; deviation = feedback - planning; concern = Yes."),
-        ("Rule 5 - new rows", "Rows only in feedback are added (New Project, or New Phase Allocation when the base project already "
+        ("Rule 4 - new rows", "Rows only in feedback are added (New Project, or New Phase Allocation when the base project already "
                               "exists in that department's baseline)."),
-        ("Rule 6 - missing rows", "Baseline rows missing from feedback are retained (not removed)."),
-        ("Rule 7 - phase moves", "Same project found under another phase in the feedback is paired with its baseline row; the MH "
+        ("Rule 5 - missing rows", "Baseline rows missing from feedback are retained (not removed)."),
+        ("Rule 6 - phase moves", "Same project found under another phase in the feedback is paired with its baseline row; the MH "
                                  "comparison is like-for-like and the baseline phase is kept until Corporate Planning approves the "
                                  "category change. Identical values = 'Phase Label Change Only' (usually a missing phase heading)."),
-        ("Rule 8 - gross vs net", "Gross increase, gross reduction, net and any offsetting phase redistribution are reported separately."),
+        ("Rule 7 - gross vs net", "Gross increase, gross reduction, net and any offsetting phase redistribution are reported separately."),
+        ("Net deviation bridge", "Each row's net change falls in one bucket: new work (row only in feedback), removed allocation "
+                                 "(feedback zeroes the row), and for all other rows the increase inside the baseline start-finish, "
+                                 "the increase outside it (extension or earlier start) and the reduction inside it. The five "
+                                 "buckets add up to the net deviation (check row on the Executive Summary)."),
         ("Code corrections", "A feedback row with no baseline match is paired with a baseline row missing from feedback in the same "
-                             "department/phase when titles match >= 80%."),
-        ("Unresolved blanks", "Departments without uploaded -c files come from the Copilot table, which stored blank feedback as 0. "
-                              "Those zeros are treated as blank (baseline retained) and listed as 'Blank/zero not applied'. "
-                              "In the 7 files read directly, a blank cell the department marked red/highlighted is listed the same way."),
+                             "department/phase when titles match >= 80%. A code typed in column A that differs from the activity "
+                             "code is reported as a requested code correction (the activity code is kept)."),
+        ("Formulas in feedback", "A row-total formula typed into a month cell (e.g. =SUM(C39:V39)) is ignored and the planning value "
+                                 "kept; it is logged as a High data-quality item."),
+        ("Unresolved blanks", f"Departments without -c files read directly come from the Copilot table, which stored blank feedback as 0 "
+                              f"({n_cop} departments' feedback this cycle). Those zeros are treated as blank (baseline retained) and "
+                              f"listed as 'Blank/zero not applied'. In the {n_dir} feedback files read directly, a blank cell the "
+                              "department marked red/highlighted is listed the same way."),
+        ("Feedback status", "From the files and the workflow tracker: 'Feedback received - changes / no MH change' = -c file "
+                            "processed; 'Comments received ... file not provided' = the tracker shows comments received but no file "
+                            "was available; 'No comments received (tracker)' = nothing received. Departments without a processed "
+                            "file keep their original (no change) and are shown in red italic on Department Ranking."),
+        ("Project master check", "Codes are checked against the ENPPI project master: not in master (new or proposal code), "
+                                 "no project code, or an internal / overhead account (e.g. 8700100 Business Development) used "
+                                 "for project work - a placeholder until a project code is assigned."),
         ("Implementation", "Per changed cell: Implemented if After = Final; Not implemented if After = Planning; otherwise Partially "
                            "implemented (share = movement toward the request). Row rate is weighted by requested MH: >= 95% Implemented, "
-                           ">= 5% Partially implemented, else Not implemented."),
-        ("Severity points", "Gross change (Inc + |Red|): >=20k 5, >=10k 4, >=5k 3, >=2k 2, >=500 1 | Net % of planning: new or >=50% 2, "
-                            ">=20% 1 | Departments raising: >=6 3, >=4 2, >=2 1 | Months affected: >=12 2, >=6 1 | +1 new allocation | "
-                            "+1 schedule extension. Critical >= 10, High 7-9, Medium 4-6, Low 1-3."),
+                           ">= 5% Partially implemented, else Not implemented. Code or phase changes without MH change are "
+                           "'Code or phase change - confirm in Primavera'."),
+        ("Severity points", "Gross change (Inc + |Red|): >=50k 6, >=20k 5, >=10k 4, >=5k 3, >=2k 2, >=500 1 | Net % of planning: "
+                            "new or >=50% 2, >=20% 1 | Departments raising: >=6 3, >=4 2, >=2 1 | Months affected: >=12 2, >=6 1 | "
+                            "+1 new allocation | +1 schedule extension. Critical >= 10, High 7-9, Medium 4-6, Low 0-3 with a concern, "
+                            "No Concern without one. Ties rank by gross change."),
+        ("Concern categories", "Engine sub-types map to the brief's categories (column 'Brief Categories'): Earlier Start -> "
+                               "Schedule Acceleration; Rescheduled (later start) -> Monthly Redistribution; Phase Label Change "
+                               "Only -> Phase Transfer; New Project (code reused) -> New Project."),
         ("Capacity", f"Effective heads = ROUNDUP(Permanent x {PERMANENT_EFFECTIVENESS}) + Temporary; capacity = heads x "
                      f"{HOURS_PER_MAN_MONTH} MH/month (factors from the Forecast Comments PBIX). Managers and Loan-to/unpaid staff excluded. "
                      "Headcount date of 'Table for Emails' is not stated in the file - confirm it matches this cycle."),
         ("Firm workload", "Running + Internal / Unforeseen + Loan To + Under Signature (pipeline categories excluded)."),
-        ("Category rule", "Internal / Unforeseen = project 1100100 under Running; it remains part of Running totals."),
+        ("Category rule", "Internal / Unforeseen = project 1100100 under Running; it remains part of Running totals "
+                          "(see the 'Running incl. Internal' memo rows on Monthly Workload Impact)."),
         ("Limitations", meta["limitations"]),
     ]
     for i, (k, v) in enumerate(lines, start=3):
@@ -740,11 +884,14 @@ def _method(wb, meta):
     ws.column_dimensions["B"].width = 140
 
 
-def _exec_summary(wb, dr_total, pr_first, findings, actions, meta):
+def _exec_summary(wb, dr_total, pr_first, pr_last, findings, actions, meta, rr_last, ps):
     ws = wb["Executive Summary"]
     _title(ws, f"ENPPI Workload Forecast - Discipline Comments Analysis ({meta['cycle']})",
            f"Planning Input vs Discipline Comment vs After Implementation | window {meta['window']} | generated {meta['generated']}")
     D = "'Department Ranking'!"
+    R = "'Row Register'!"
+    P = "'Project Ranking'!"
+    rng = lambda col: f"{R}${RR[col]}$5:${RR[col]}${rr_last}"
     t = dr_total
     kpis = [("Planning Input MH", f"={D}D{t}", MH), ("Discipline-adjusted MH", f"={D}E{t}", MH),
             ("Net deviation requested", f"={D}I{t}", MH), ("Net deviation %", f"={D}J{t}", PCT),
@@ -763,6 +910,14 @@ def _exec_summary(wb, dr_total, pr_first, findings, actions, meta):
         ws.merge_cells(start_row=r, start_column=c, end_row=r, end_column=c + 2)
         ws.merge_cells(start_row=r + 1, start_column=c, end_row=r + 1, end_column=c + 2)
         ws.row_dimensions[r + 1].height = 22
+    first_d, last_d = 5, t - 1
+    status = f"{D}$C${first_d}:$C${last_d}"
+    ws.cell(11, 1, f'="Feedback coverage: "&COUNTIFS({status},"Feedback received*")&" of "&ROWS({status})&" departments '
+                   f'processed, holding "&TEXT(SUMIFS({D}$D${first_d}:$D${last_d},{status},"Feedback received*"),"#,##0")&" MH ("'
+                   f'&TEXT(SUMIFS({D}$D${first_d}:$D${last_d},{status},"Feedback received*")/{D}D{t},"0%")&") of Planning Input. '
+                   f'The others keep their original with no change (red italic on Department Ranking)."')
+    ws.cell(11, 1).font = _f(bold=True, color="C00000")
+    ws.merge_cells(start_row=11, start_column=1, end_row=11, end_column=12)
     row = 12
     ws.cell(row, 1, "Key findings").font = Font(name=FONT, bold=True, size=11, color=NAVY)
     for k, txt in enumerate(findings, start=1):
@@ -771,8 +926,73 @@ def _exec_summary(wb, dr_total, pr_first, findings, actions, meta):
         ws.merge_cells(start_row=row + k, start_column=1, end_row=row + k, end_column=12)
         ws.row_dimensions[row + k].height = 14 * (len(txt) // 165 + 1) + 4
     row += len(findings) + 2
+
+    # net deviation bridge with a waterfall
+    ws.cell(row, 1, "Net deviation bridge - Planning Input to Discipline-adjusted").font = Font(name=FONT, bold=True, size=11, color=NAVY)
+    _header(ws, row + 1, 1, ["Step", "", "", "MH", "% of Planning", "chart label", "chart base", "chart bar"])
+    ws.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=3)
+    b0 = row + 2
+    steps = [("Planning Input", f"={D}D{t}")] + [(lab, f"=SUM({rng(col)})") for col, lab in BRIDGE]
+    steps.append(("Discipline-adjusted", f"=D{b0}+SUM(D{b0 + 1}:D{b0 + len(BRIDGE)})"))
+    short = ["Planning", "New work", "Increase", "Extension", "Reduction", "Removed", "Discipline"]
+    for k, (lab, f) in enumerate(steps):
+        r = b0 + k
+        ws.cell(r, 1, lab)
+        ws.cell(r, 4, f)
+        ws.cell(r, 5, f"=IF($D${b0}=0,0,D{r}/$D${b0})")
+        ws.cell(r, 6, short[k])
+        if 0 < k < len(steps) - 1:
+            cum = f"($D${b0}+SUM($D${b0 + 1}:D{r})-D{r})" if k > 1 else f"$D${b0}"
+            ws.cell(r, 7, f"=MIN({cum},{cum}+D{r})")
+            ws.cell(r, 8, f"=ABS(D{r})")
+        else:
+            ws.cell(r, 7, 0)
+            ws.cell(r, 8, f"=D{r}")
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+        total = k in (0, len(steps) - 1)
+        for j in range(1, 9):
+            c = ws.cell(r, j)
+            c.font, c.border = _f(bold=total, color=MUTED if j > 5 else INK), BOX
+            c.number_format = PCT if j == 5 else (MH if j in (4, 7, 8) else "General")
+            if total:
+                c.fill = _fill("DDEBF7")
+    r = b0 + len(steps)
+    ws.cell(r, 1, "Check: bridge minus Department Ranking total (should be 0)").font = _f(italic=True, color=MUTED)
+    ws.cell(r, 4, f"=D{r - 1}-{D}E{t}").number_format = MH
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+    for lab, val in meta.get("bridge_memo", []):
+        r += 1
+        ws.cell(r, 1, f"memo: {lab}").font = _f(italic=True, color=MUTED)
+        ws.cell(r, 4, val).number_format = MH
+        ws.cell(r, 4).font = _f(italic=True, color=MUTED)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+    ch = BarChart()
+    ch.type, ch.grouping, ch.overlap = "col", "stacked", 100
+    ch.title = "Net deviation bridge (MH)"
+    ch.height, ch.width = 7.5, 13
+    ch.legend = None
+    ch.y_axis.majorGridlines.spPr = GraphicalProperties(ln=LineProperties(solidFill="E7E6E6"))
+    ch.y_axis.number_format = '#,##0,"k"'
+    if meta.get("bridge_min") is not None:
+        ch.y_axis.scaling.min = meta["bridge_min"]
+    ch.add_data(Reference(ws, min_col=7, max_col=8, min_row=b0, max_row=b0 + len(steps) - 1), titles_from_data=False)
+    ch.set_categories(Reference(ws, min_col=6, min_row=b0, max_row=b0 + len(steps) - 1))
+    base, bar = ch.series
+    base.graphicalProperties.noFill = True
+    base.graphicalProperties.line.noFill = True
+    bar.graphicalProperties.solidFill = SCEN["Discipline Comment"]
+    for k, colr in enumerate([NAVY] + ["EB6834", "EB6834", "EB6834", "2A78D6", "2A78D6"] + [NAVY]):
+        dp = DataPoint(idx=k)
+        dp.graphicalProperties.solidFill = colr
+        dp.graphicalProperties.line.solidFill = colr
+        bar.dPt.append(dp)
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    ch.gapWidth = 60
+    ws.add_chart(ch, f"I{row}")
+    row = max(r, row + 15) + 2
+
     ws.cell(row, 1, "Top 10 projects by severity").font = Font(name=FONT, bold=True, size=11, color=NAVY)
-    P = "'Project Ranking'!"
     heads = ["Rank", "Project", "Name", "Severity", "Depts", "Planning MH", "Discipline MH", "Net", "Net %", "After Impl. MH", "Impl. rate"]
     _header(ws, row + 1, 1, heads)
     src = ["A", "B", "D", "E", "G", "I", "J", "N", "O", "K", "V"]
@@ -785,6 +1005,33 @@ def _exec_summary(wb, dr_total, pr_first, findings, actions, meta):
     for sev, colr in SEV_FILL.items():
         ws.conditional_formatting.add(f"D{row + 2}:D{row + 11}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(colr),
                                       font=Font(name=FONT, color="FFFFFF" if sev == "Critical" else INK)))
+    row += 14
+    ws.cell(row, 1, "Top 10 projects by gross MH increase requested").font = Font(name=FONT, bold=True, size=11, color=NAVY)
+    heads = ["#", "Project", "Name", "Severity", "Depts", "Planning MH", "Discipline MH", "Gross Increase", "Net", "Master check"]
+    _header(ws, row + 1, 1, heads)
+    top = ps.sort_values("Gross_Increase", ascending=False).head(10)
+    for k, rec in enumerate(top.itertuples()):
+        r = row + 2 + k
+        ws.cell(r, 1, k + 1)
+        ws.cell(r, 2, rec.ProjectFull)
+        ws.cell(r, 3, f"=IFERROR(INDEX({P}$D${pr_first}:$D${pr_last},MATCH($B{r},{P}$B${pr_first}:$B${pr_last},0)),\"\")")
+        ws.cell(r, 4, f"=IFERROR(INDEX({P}$E${pr_first}:$E${pr_last},MATCH($B{r},{P}$B${pr_first}:$B${pr_last},0)),\"\")")
+        ws.cell(r, 5, f"=IFERROR(INDEX({P}$G${pr_first}:$G${pr_last},MATCH($B{r},{P}$B${pr_first}:$B${pr_last},0)),\"\")")
+        ws.cell(r, 6, f"=SUMIFS({rng('P_Total')},{rng('ProjectFull')},$B{r})")
+        ws.cell(r, 7, f"=SUMIFS({rng('Final_Total')},{rng('ProjectFull')},$B{r})")
+        ws.cell(r, 8, f"=SUMIFS({rng('Gross_Increase')},{rng('ProjectFull')},$B{r})")
+        ws.cell(r, 9, f"=H{r}+SUMIFS({rng('Gross_Reduction')},{rng('ProjectFull')},$B{r})")
+        ws.cell(r, 10, str(getattr(rec, "Master_Flag", "") or ""))
+        for j in range(1, 11):
+            c = ws.cell(r, j)
+            c.font, c.border = _f(), BOX
+            c.number_format = MH if j in (6, 7, 8, 9) else "General"
+    for sev, colr in SEV_FILL.items():
+        ws.conditional_formatting.add(f"D{row + 2}:D{row + 11}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(colr),
+                                      font=Font(name=FONT, color="FFFFFF" if sev == "Critical" else INK)))
+    ws.merge_cells(start_row=row + 1, start_column=10, end_row=row + 1, end_column=12)
+    for k in range(10):
+        ws.merge_cells(start_row=row + 2 + k, start_column=10, end_row=row + 2 + k, end_column=12)
     row += 14
     ws.cell(row, 1, "Top 8 departments by absolute net deviation").font = Font(name=FONT, bold=True, size=11, color=NAVY)
     heads = ["Dept", "Department", "", "Planning MH", "Discipline MH", "Net", "Dev. %", "Concern items", "Impl. rate", "Avg util. (disc.)"]
@@ -810,7 +1057,8 @@ def _exec_summary(wb, dr_total, pr_first, findings, actions, meta):
         ws.column_dimensions[L(j)].width = w
 
 
-def write_workbook(path, *, rows, cells, transfers, ds, ps, mdf, cap, chk, inventory, issues, findings, actions, meta, possible=None):
+def write_workbook(path, *, rows, cells, transfers, ds, ps, mdf, cap, chk, inventory, issues, findings, actions, meta,
+                   possible=None, sections=None):
     wb = Workbook()
     wb.remove(wb.active)
     for name in ["Executive Summary", "Department Ranking", "Project Ranking", "Monthly Workload Impact",
@@ -820,21 +1068,24 @@ def write_workbook(path, *, rows, cells, transfers, ds, ps, mdf, cap, chk, inven
     _, rr_last = _row_register(wb, rows)
     _, md_last = _monthly_data(wb, mdf)
     _, cap_last = _capacity(wb, cap)
-    _, _, dr_total = _dept_ranking(wb, ds, rr_last, md_last, cap_last)
-    pr_first, _ = _project_ranking(wb, ps, rr_last)
+    _, _, dr_total = _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections)
+    pr_first, pr_last = _project_ranking(wb, ps, rr_last)
     months = sorted(cells["Month"].unique())
     dm = mdf.groupby(["DeptCode", "Month"]).sum(numeric_only=True)
     dev_lim = float(max(1.0, (dm["Discipline_Final_MH"] - dm["Planning_MH"]).abs().max()))
     _monthly_impact(wb, months, md_last, cap_last, dev_lim)
     _deviation_register(wb, rows, ps)
     _cell_changes(wb, cells, rows)
-    _new_projects(wb, rows)
+    _new_projects(wb, rows, issues)
     _phase_and_schedule(wb, rows, transfers, issues, possible)
     _implementation(wb, rows, rr_last)
     _checklist(wb, chk)
     _dq(wb, inventory, issues)
     _method(wb, meta)
-    _exec_summary(wb, dr_total, pr_first, findings, actions, meta)
+    plan = rows["P_Total"].sum()
+    cum = plan + np.cumsum([rows[b].sum() for b, _ in BRIDGE])
+    meta = dict(meta, bridge_min=float(np.floor(min(plan, cum.min()) * 0.97 / 100000) * 100000))
+    _exec_summary(wb, dr_total, pr_first, pr_last, findings, actions, meta, rr_last, ps)
     tab = {"Executive Summary": NAVY, "Row Register": "7F7F7F", "Monthly Data": "7F7F7F", "Capacity": "7F7F7F"}
     for ws in wb.worksheets:
         ws.page_setup.orientation = "landscape"

@@ -21,6 +21,7 @@ import datetime as dt
 import re
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from dataclasses import asdict
 from pathlib import Path
 
@@ -219,9 +220,12 @@ def _finish(df: pd.DataFrame) -> pd.DataFrame:
     df["Category"] = df["Phase"]
     df.loc[(df["Phase"] == "Running") & (df["ProjectBase"] == INTERNAL_CODE), "Category"] = "Internal / Unforeseen"
     df["SourceRow"] = df["SourceRow"].astype(int)
-    # rows without any project code get a stable surrogate so they rank, chart and join like any project
+    # rows without any project code get a stable surrogate so they rank, chart and join like any project;
+    # it hashes the title (not the row number) so the same uncoded row still matches across the three files
     unc = df["ProjectFull"].fillna("") == ""
-    df.loc[unc, "ProjectFull"] = "UNCODED-" + df.loc[unc, "DeptCode"].astype(str) + "-R" + df.loc[unc, "SourceRow"].astype(str)
+    tag = df.loc[unc, "ActivityName"].fillna("").map(
+        lambda t: f"{zlib.crc32(re.sub(r'[^a-z0-9]', '', t.lower())[:40].encode()):08X}"[:6])
+    df.loc[unc, "ProjectFull"] = "UNCODED-" + df.loc[unc, "DeptCode"].astype(str) + "-" + tag
     df.loc[unc, "ProjectBase"] = df.loc[unc, "ProjectFull"]
     return df[COLUMNS]
 
