@@ -1,0 +1,9 @@
+# Analysis outputs contain ENPPI project, client and headcount data - keep them out of this public repository
+comments_analysis/output/
+# Source workbooks (department feedback, Primavera extracts, headcount) - never commit
+*.xlsx
+*.xlsm
+*.pbix
+*.csv
+__pycache__/
+*.pyc

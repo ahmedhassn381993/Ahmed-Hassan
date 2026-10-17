@@ -1,0 +1,28 @@
+{
+  "name": "ENPPI Workload Forecast",
+  "dataColors": [
+    "#2A78D6",
+    "#EB6834",
+    "#1BAF7A",
+    "#607D8B",
+    "#6A1B9A",
+    "#EF6C00",
+    "#F9A825",
+    "#2E7D32"
+  ],
+  "background": "#FFFFFF",
+  "foreground": "#0B0B0B",
+  "tableAccent": "#1F3864",
+  "good": "#1BAF7A",
+  "neutral": "#EDA100",
+  "bad": "#E34948",
+  "maximum": "#D95926",
+  "center": "#F7F7F7",
+  "minimum": "#2A78D6",
+  "textClasses": {
+    "title": { "fontFace": "Arial", "fontSize": 12, "color": "#1F3864" },
+    "header": { "fontFace": "Arial", "fontSize": 10, "color": "#1F3864" },
+    "label": { "fontFace": "Arial", "fontSize": 9, "color": "#52514E" },
+    "callout": { "fontFace": "Arial", "fontSize": 24, "color": "#1F3864" }
+  }
+}

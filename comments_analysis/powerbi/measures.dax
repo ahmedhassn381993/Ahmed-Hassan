@@ -1,0 +1,92 @@
+// =====================================================================================
+// Workload Comments Analysis - DAX measures
+// Create an empty table "_Measures" (Enter data > one blank column, then hide the column)
+// and add each measure below to it. Display folders are suggested in [brackets].
+// Scenario names: "Planning Input", "Discipline Comment", "After Implementation".
+// =====================================================================================
+
+// [1 Workload]
+Total MH = SUM ( FactWorkload[MH] )
+Planning MH = CALCULATE ( [Total MH], DimScenario[Scenario] = "Planning Input" )
+Discipline MH = CALCULATE ( [Total MH], DimScenario[Scenario] = "Discipline Comment" )
+Implemented MH = CALCULATE ( [Total MH], DimScenario[Scenario] = "After Implementation" )
+
+// Man-months use the same 150 MH factor as the existing workload report
+Planning MM = DIVIDE ( [Planning MH], 150 )
+Discipline MM = DIVIDE ( [Discipline MH], 150 )
+Implemented MM = DIVIDE ( [Implemented MH], 150 )
+
+// [2 Deviation]
+Disc vs Plan MH = [Discipline MH] - [Planning MH]
+Impl vs Plan MH = [Implemented MH] - [Planning MH]
+Impl vs Disc MH = [Implemented MH] - [Discipline MH]
+Disc vs Plan % = DIVIDE ( [Disc vs Plan MH], [Planning MH] )
+Impl vs Disc % = DIVIDE ( [Impl vs Disc MH], [Discipline MH] )
+// same name and meaning as the existing PBIX measure, now against the planning input
+ABS_Variance = ABS ( [Disc vs Plan MH] )
+ABS_Variance_MMonth = DIVIDE ( [ABS_Variance], 150 )
+
+// [3 Comment items]
+Gross Increase MH = SUM ( FactCommentItems[Gross Increase] )
+Gross Reduction MH = SUM ( FactCommentItems[Gross Reduction] )
+Net Change MH = [Gross Increase MH] + [Gross Reduction MH]
+Requested Change MH = [Gross Increase MH] - [Gross Reduction MH]
+Concern Items = CALCULATE ( COUNTROWS ( FactCommentItems ), FactCommentItems[Concern] = "Yes" )
+Projects with Concern = CALCULATE ( DISTINCTCOUNT ( FactCommentItems[ProjectCode] ), FactCommentItems[Concern] = "Yes" )
+Departments Raising = CALCULATE ( DISTINCTCOUNT ( FactCommentItems[DeptCode] ), FactCommentItems[Concern] = "Yes" )
+New Project Rows =
+    CALCULATE (
+        COUNTROWS ( FactCommentItems ),
+        KEEPFILTERS ( CONTAINSSTRING ( FactCommentItems[Primary Type], "New" ) )
+    )
+New Project MH =
+    CALCULATE (
+        SUM ( FactCommentItems[Discipline MH] ),
+        KEEPFILTERS ( CONTAINSSTRING ( FactCommentItems[Primary Type], "New" ) )
+    )
+Phase Moves = CALCULATE ( COUNTROWS ( FactCommentItems ), FactCommentItems[Requested Phase] <> "" )
+Blank Not Applied MH = SUM ( FactCommentItems[Blank Not Applied MH] )
+Changed Cells = CALCULATE ( COUNTROWS ( FactCellChanges ), FactCellChanges[Cell Status] <> "Blank retained" )
+
+// [4 Implementation]
+Implemented Request MH = SUM ( FactCommentItems[Implemented Request MH] )
+Implementation Rate = DIVIDE ( [Implemented Request MH], [Requested Change MH] )
+Items Implemented = CALCULATE ( [Concern Items], FactCommentItems[Implementation Status] = "Implemented" )
+Items Partially Implemented = CALCULATE ( [Concern Items], FactCommentItems[Implementation Status] = "Partially implemented" )
+Items Not Implemented =
+    CALCULATE ( [Concern Items], LEFT ( FactCommentItems[Implementation Status], 15 ) = "Not implemented" )
+Planner Change Without Comment MH = SUM ( FactCommentItems[Unrequested Change MH] )
+
+// [5 Capacity] - capacity is per month, so multiply by the months in context
+Months In Context = COUNTROWS ( VALUES ( DimDate[Month] ) )
+Capacity MH = SUM ( DimDepartment[Capacity_MH_per_Month] ) * [Months In Context]
+Effective Heads = SUM ( DimDepartment[Effective_Heads] )
+Utilisation Planning = DIVIDE ( [Planning MH], [Capacity MH] )
+Utilisation Discipline = DIVIDE ( [Discipline MH], [Capacity MH] )
+Utilisation Implemented = DIVIDE ( [Implemented MH], [Capacity MH] )
+Firm Discipline MH = CALCULATE ( [Discipline MH], DimCategory[Firm Workload] = "Yes" )
+Firm Utilisation Discipline = DIVIDE ( [Firm Discipline MH], [Capacity MH] )
+Overload Months (Discipline) =
+    COUNTROWS ( FILTER ( VALUES ( DimDate[Month] ), [Utilisation Discipline] > 1 ) )
+Extra Heads Needed (Peak) =
+    VAR PeakMH = MAXX ( VALUES ( DimDate[Month] ), [Discipline MH] )
+    VAR CapPerMonth = SUM ( DimDepartment[Capacity_MH_per_Month] )
+    RETURN MAX ( 0, DIVIDE ( PeakMH - CapPerMonth, 150 ) )
+
+// [6 Severity]
+Critical Projects = CALCULATE ( [Projects with Concern], DimProject[Severity] = "Critical" )
+High Projects = CALCULATE ( [Projects with Concern], DimProject[Severity] = "High" )
+
+// [7 Labels and formatting helpers]
+Selected Department =
+    IF ( HASONEVALUE ( DimDepartment[DeptCode] ), SELECTEDVALUE ( DimDepartment[Dept Label] ), "All departments" )
+As Of Label = "Cycle " & SELECTEDVALUE ( FactWorkload[Cycle], "multiple cycles" )
+// Use with Format > Conditional formatting > Field value on deviation visuals
+Deviation Colour =
+    SWITCH ( TRUE (), [Disc vs Plan MH] > 0, "#EB6834", [Disc vs Plan MH] < 0, "#2A78D6", "#9E9E9E" )
+Severity Colour =
+    SWITCH ( SELECTEDVALUE ( DimProject[Severity] ),
+        "Critical", "#C00000", "High", "#F4B183", "Medium", "#FFE699", "Low", "#E2EFDA", "#F2F2F2" )
+Implementation Colour =
+    SWITCH ( TRUE (), ISBLANK ( [Implementation Rate] ), "#F2F2F2",
+        [Implementation Rate] >= 0.95, "#C6EFCE", [Implementation Rate] >= 0.05, "#FFEB9C", "#FFC7CE" )
