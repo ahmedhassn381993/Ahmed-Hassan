@@ -33,7 +33,7 @@ Net Change MH = [Gross Increase MH] + [Gross Reduction MH]
 Requested Change MH = [Gross Increase MH] - [Gross Reduction MH]
 Concern Items = CALCULATE ( COUNTROWS ( FactCommentItems ), FactCommentItems[Concern] = "Yes" )
 Projects with Concern = CALCULATE ( DISTINCTCOUNT ( FactCommentItems[ProjectCode] ), FactCommentItems[Concern] = "Yes" )
-Departments Raising = CALCULATE ( DISTINCTCOUNT ( FactCommentItems[DeptCode] ), FactCommentItems[Concern] = "Yes" )
+Departments With Concern = CALCULATE ( DISTINCTCOUNT ( FactCommentItems[DeptCode] ), FactCommentItems[Concern] = "Yes" )
 New Project Rows =
     CALCULATE (
         COUNTROWS ( FactCommentItems ),
@@ -41,16 +41,16 @@ New Project Rows =
     )
 New Project MH =
     CALCULATE (
-        SUM ( FactCommentItems[Discipline MH] ),
+        SUM ( FactCommentItems[Item Discipline MH] ),
         KEEPFILTERS ( CONTAINSSTRING ( FactCommentItems[Primary Type], "New" ) )
     )
 Phase Moves = CALCULATE ( COUNTROWS ( FactCommentItems ), FactCommentItems[Requested Phase] <> "" )
-Blank Not Applied MH = SUM ( FactCommentItems[Blank Not Applied MH] )
+Unresolved Blank MH = SUM ( FactCommentItems[Blank Not Applied MH] )
 Changed Cells = CALCULATE ( COUNTROWS ( FactCellChanges ), FactCellChanges[Cell Status] <> "Blank retained" )
 
 // [4 Implementation]
-Implemented Request MH = SUM ( FactCommentItems[Implemented Request MH] )
-Implementation Rate = DIVIDE ( [Implemented Request MH], [Requested Change MH] )
+Implemented of Request MH = SUM ( FactCommentItems[Implemented Request MH] )
+Implementation Rate = DIVIDE ( [Implemented of Request MH], [Requested Change MH] )
 Items Implemented = CALCULATE ( [Concern Items], FactCommentItems[Implementation Status] = "Implemented" )
 Items Partially Implemented = CALCULATE ( [Concern Items], FactCommentItems[Implementation Status] = "Partially implemented" )
 Items Not Implemented =
@@ -122,13 +122,14 @@ WL% (Discipline) = [Projects Total% (Discipline)] + [Proposal% (Discipline)] + [
 WL% (Implemented) = [Projects Total% (Implemented)] + [Proposal% (Implemented)] + [Potential% (Implemented)]
 
 // [9 Bridge and coverage]
-Bridge New Work MH = SUM ( FactCommentItems[Bridge New Work MH] )
-Bridge Increase MH = SUM ( FactCommentItems[Bridge Increase MH] )
-Bridge Extension MH = SUM ( FactCommentItems[Bridge Extension MH] )
-Bridge Reduction MH = SUM ( FactCommentItems[Bridge Reduction MH] )
-Bridge Removed MH = SUM ( FactCommentItems[Bridge Removed MH] )
+New Work MH = SUM ( FactCommentItems[Bridge New Work MH] )
+Increase Within Schedule MH = SUM ( FactCommentItems[Bridge Increase MH] )
+Schedule Extension MH = SUM ( FactCommentItems[Bridge Extension MH] )
+Reduction Within Schedule MH = SUM ( FactCommentItems[Bridge Reduction MH] )
+Removed Allocation MH = SUM ( FactCommentItems[Bridge Removed MH] )
 Bridge Check MH =
-    [Bridge New Work MH] + [Bridge Increase MH] + [Bridge Extension MH] + [Bridge Reduction MH] + [Bridge Removed MH]
+    [New Work MH] + [Increase Within Schedule MH] + [Schedule Extension MH] + [Reduction Within Schedule MH]
+        + [Removed Allocation MH]
         - [Net Change MH]
 Possible Transfer MH = SUM ( PossibleTransfers[Possible Offset MH] )
 Processed Planning MH = CALCULATE ( [Planning MH], DimDepartment[Feedback Processed] = "Yes" )

@@ -65,11 +65,11 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
         "Cycle": cycle, "RowKey": r["RowKey"], "DeptCode": r["DeptCode"].astype(int), "SubDept": r["SectionCode"],
         "Category": r["Category"], "ProjectCode": r["ProjectFull"],
         "Activity": r["D_Name"].fillna(r["P_Name"]).fillna(r["I_Name"]),
-        "Planning MH": r["P_Total"], "Discipline MH": r["Final_Total"], "Implemented MH": r["I_Total"],
+        "Item Planning MH": r["P_Total"], "Item Discipline MH": r["Final_Total"], "Item Implemented MH": r["I_Total"],
         "Gross Increase": r["Gross_Increase"], "Gross Reduction": r["Gross_Reduction"], "Net Change": r["Net_Change"],
         "Concern": r["Concern"].map({True: "Yes", False: "No"}), "Primary Type": r["Primary_Type"],
         "Concern Types": r["Concern_Types"], "Implementation Status": r["Implementation_Status"],
-        "Implementation Rate": r["Impl_Ratio"], "Implemented Request MH": r["Implemented_Request_MH"],
+        "Item Implementation Rate": r["Impl_Ratio"], "Implemented Request MH": r["Implemented_Request_MH"],
         "Unrequested Change MH": r["Unrequested_Gross"], "Requested Phase": r["RequestedPhase"],
         "Code Correction": r["CodeCorrection"], "Months Changed": r["Months_Changed"],
         "Blank Not Applied MH": r["Ambiguous_MH"], "Feedback File": r["D_File"], "Feedback Row": r["D_Row"],
@@ -85,8 +85,8 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
     ch = c[c["Changed"] | c["AmbiguousBlank"]].copy()
     cell_changes = pd.DataFrame({
         "Cycle": cycle, "RowKey": ch["RowKey"], "DeptCode": ch["DeptCode"].astype(int), "ProjectCode": ch["RowKey"].map(proj),
-        "Month": pd.to_datetime(ch["Month"]), "Planning MH": ch["P0"], "Discipline Value": ch["D"],
-        "Discipline MH": ch["Final"], "Change MH": ch["Change"], "Implemented MH": ch["I0"],
+        "Month": pd.to_datetime(ch["Month"]), "Cell Planning MH": ch["P0"], "Discipline Value": ch["D"],
+        "Cell Discipline MH": ch["Final"], "Change MH": ch["Change"], "Cell Implemented MH": ch["I0"],
         "Cell Status": ch["CellStatus"].where(ch["Changed"], "Blank retained"), "Blank Note": ch["AmbiguousReason"]})
 
     dim_dept = pd.DataFrame({"DeptCode": [int(d) for d in DEPARTMENTS], "Department": list(DEPARTMENTS.values())})
@@ -163,8 +163,8 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
         ws = wb.create_sheet(name[:31])
         ws.append(list(t.columns))
         for rec in t.itertuples(index=False):
-            ws.append([None if (isinstance(v, float) and pd.isna(v)) else (v.to_pydatetime() if isinstance(v, pd.Timestamp) else v)
-                       for v in rec])
+            ws.append([None if (v is pd.NA or (isinstance(v, float) and pd.isna(v)))
+                       else (v.to_pydatetime() if isinstance(v, pd.Timestamp) else v) for v in rec])
         for cell in ws[1]:
             cell.font = Font(name="Arial", bold=True)
         if len(t):
