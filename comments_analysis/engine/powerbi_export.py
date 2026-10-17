@@ -36,7 +36,7 @@ def _client(name: str) -> str:
     return s.split(",")[0].strip()[:40] if "," in s else ""
 
 
-def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str):
+def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str, possible=None):
     folder.mkdir(parents=True, exist_ok=True)
     c = cells.copy()
     c["RowKey"] = _row_key(c)
@@ -120,6 +120,8 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
     tables = {"FactWorkload": fact, "FactCommentItems": items, "FactCellChanges": cell_changes, "BridgeConcernType": bridge,
               "DimDepartment": dim_dept, "DimProject": dim_proj, "DimCategory": dim_cat, "DimScenario": dim_scen,
               "DimDate": dim_date, "DataQuality": dq}
+    if possible is not None and len(possible):
+        tables["PossibleTransfers"] = possible.assign(Cycle=cycle)
     for name, t in tables.items():
         t.to_csv(folder / f"{name}.csv", index=False, encoding="utf-8-sig", date_format="%Y-%m-%d")
     wb = Workbook()

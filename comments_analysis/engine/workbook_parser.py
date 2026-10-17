@@ -30,6 +30,13 @@ PHASE_RE = re.compile(
     r"^\s*(\d)\s*[.\-)]\s*(running|loan\s*to|under\s*signature|proposed|proposal|potential\s*opportunity|oppo)",
     re.I,
 )
+# the heading's words decide the phase: departments renumber headings (2300-c has "3. Proposed")
+PHASE_WORDS = [("running", "Running"), ("loan", "Loan To"), ("under", "Under Signature"),
+               ("propos", "Proposal"), ("potential", "Potential Opportunity"), ("oppo", "Potential Opportunity")]
+# rows departments add under the projects (capacity checks, headcount); the rest of the sheet is ignored
+FOOTER_RE = re.compile(
+    r"(?i)^\s*(total\s*mhrs?|available\s+man|remaining|def+iciency|required\s+man\s*power|average\s+required|"
+    r"no\.?\s*of\s+employees|difference|division\s*/\s*depart|qty\s+of)")
 INTERNAL_CODE = "1100100"
 MONTH_TEXT_RE = re.compile(r"^([A-Za-z]{3})[-\s/]?(\d{2,4})$")
 
@@ -182,13 +189,26 @@ def parse_workbook(path: str | Path, dept_code: str | None = None) -> ParsedWork
             a, b = ws.cell(r, 1), ws.cell(r, 2)
             a_val = wsv.cell(r, 1).value if isinstance(a.value, str) and a.value.startswith("=") else a.value
             text = str(b.value).strip() if b.value is not None else ""
+            if text == "None":   # literal text left by copy-paste
+                text = ""
             if not text and (a.value is None or str(a.value).startswith("=")):
                 if all(ws.cell(r, c).value in (None, "") for c in month_cols):
                     continue  # empty template row
             pm = PHASE_RE.match(text)
             if pm and not re.match(r"^\s*\d{4,}", text):
-                phase = PHASES[pm.group(1)]
+                label = pm.group(2).lower()
+                new_phase = next(v for k, v in PHASE_WORDS if label.startswith(k))
+                if new_phase != PHASES[pm.group(1)]:
+                    out.issues.append(dict(file=path.name, sheet=ws.title, row=r, severity="Warning",
+                                           issue="Phase heading renumbered by department",
+                                           detail=f"'{text}' read as {new_phase} (standard number {next(k for k, v in PHASES.items() if v == new_phase)})"))
+                phase = new_phase
                 continue
+            if FOOTER_RE.match(text) and not re.match(r"^\s*\d{4,}", text):
+                out.issues.append(dict(file=path.name, sheet=ws.title, row=r, severity="Info",
+                                       issue="Department summary block below the projects ignored",
+                                       detail=f"from row {r}: '{text[:60]}'"))
+                break
             typed_a = a.value if not str(a.value or "").startswith("=") else None
             code = parse_project_code(typed_a, text)
             if typed_a is not None and code.source == "activity":

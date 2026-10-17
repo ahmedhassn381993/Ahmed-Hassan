@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from compare import KEY, TOL, _norm_name, severity
+from compare import KEY, TOL, _norm_name, _sim, severity
 
 HOURS_PER_MAN_MONTH = 150          # as used in the Forecast Comments PBIX (AvailMHR = EffTotal*Months*150)
 PERMANENT_EFFECTIVENESS = 0.9      # PBIX Dept query: Perm_EFF = ROUNDUP(Permanent_No * 0.9)
@@ -202,4 +202,39 @@ def checklist(rows: pd.DataFrame, critical: list[tuple[str, str]]) -> pd.DataFra
                       "Comments received & partially implemented" if ratio >= 0.05 else
                       "Comments received - not implemented (planner to confirm if not applicable)")
         out.append(rec)
+    return pd.DataFrame(out)
+
+
+def possible_transfers(rows: pd.DataFrame) -> pd.DataFrame:
+    """Within one department, a reduction or removal paired with a NEW allocation of the same project
+    family (first five digits, e.g. 52482xx) or a similar title: the same work may have been re-coded or
+    moved to another phase, so the gross figures double count it. Reported for review, never netted."""
+    r = rows[rows["Concern"]].copy()
+    r["Name"] = r["D_Name"].fillna(r["P_Name"]).fillna("")
+    out = []
+    for dept, g in r.groupby("DeptCode"):
+        downs = g[g["Net_Change"] <= -TOL]
+        ups = g[(g["Net_Change"] >= TOL) & g["Primary_Type"].str.startswith("New")]
+        used = set()
+        for d in downs.sort_values("Net_Change").itertuples():
+            best = None
+            for u in ups.itertuples():
+                if u.Index in used or u.ProjectFull == d.ProjectFull:
+                    continue
+                fam = len(d.ProjectBase) >= 7 and d.ProjectBase[:5] == u.ProjectBase[:5]
+                sim = _sim(d.Name, u.Name)
+                score = (1 if fam else 0) + sim
+                if (fam or sim >= 0.6) and (best is None or score > best[0]):
+                    best = (score, u, fam, sim)
+            if best is None:
+                continue
+            _, u, fam, sim = best
+            used.add(u.Index)
+            offset = min(-d.Net_Change, u.Net_Change)
+            out.append({"Dept": int(dept), "Reduced Project": d.ProjectFull, "Reduced Phase": d.Phase, "Reduced Title": d.Name,
+                        "Reduction MH": d.Net_Change, "Added Project": u.ProjectFull, "Added Phase": u.Phase,
+                        "Added Title": u.Name, "Added MH": u.Net_Change,
+                        "Match Basis": (f"same project family {d.ProjectBase[:5]}xx" if fam else "") +
+                                       ("; " if fam and sim >= 0.6 else "") + (f"title {sim:.0%} similar" if sim >= 0.6 else ""),
+                        "Possible Offset MH": offset, "Net of the Pair MH": d.Net_Change + u.Net_Change})
     return pd.DataFrame(out)

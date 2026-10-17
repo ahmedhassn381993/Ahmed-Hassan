@@ -202,7 +202,8 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last):
         ws.cell(i, 14, int(rec.Concern_Projects))
         ws.cell(i, 15, f"=SUMIFS({rng('Changed_Cells')},{rng('DeptCode')},{crit})")
         ws.cell(i, 16, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Primary_Type")},"New Project*")')
-        ws.cell(i, 17, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Concern_Types")},"*Phase*")')
+        ws.cell(i, 17, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Concern_Types")},"*Phase Transfer*")'
+                       f'+COUNTIFS({rng("DeptCode")},{crit},{rng("Concern_Types")},"*Phase Label*")')
         ws.cell(i, 18, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Concern_Types")},"*Schedule Extension*")')
         ws.cell(i, 19, f"=SUMIFS({rng('Ambiguous_MH')},{rng('DeptCode')},{crit})")
         ws.cell(i, 20, f"=G{i}-H{i}")
@@ -533,7 +534,7 @@ def _new_projects(wb, rows):
     return len(out)
 
 
-def _phase_and_schedule(wb, rows, transfers, issues):
+def _phase_and_schedule(wb, rows, transfers, issues, possible=None):
     ws = wb["Phase Transfers & Rescheduling"]
     _title(ws, "Phase Transfers, Rescheduling and Double-Counting Risks",
            "Phase moves are paired with the baseline row and kept in the baseline phase until Corporate Planning approves the category change.")
@@ -556,6 +557,16 @@ def _phase_and_schedule(wb, rows, transfers, issues):
         row += 1
         ws.cell(row, 1, "None found: no department reduced a project in one phase while increasing it in another.").font = _f(italic=True, color=MUTED)
     row += 2
+    ws.cell(row, 1, "B2. Possible transfers between project codes or phases (verify with the department)").font = Font(name=FONT, bold=True, size=11, color=NAVY)
+    if possible is not None and len(possible):
+        _, row = _write_table(ws, possible, row + 1, fmts={c: MH for c in ["Reduction MH", "Added MH", "Possible Offset MH", "Net of the Pair MH"]},
+                              widths={"Reduced Title": 40, "Added Title": 40, "Match Basis": 30}, autofilter=False)
+        row += 1
+        ws.cell(row, 1, "Gross figures keep both rows; if confirmed, the offset is a transfer, not new workload.").font = _f(italic=True, color=MUTED)
+    else:
+        row += 1
+        ws.cell(row, 1, "None found.").font = _f(italic=True, color=MUTED)
+    row += 2
     ws.cell(row, 1, "C. Schedule changes (extension, earlier start, earlier finish, later start)").font = Font(name=FONT, bold=True, size=11, color=NAVY)
     s = rows[rows["Concern_Types"].str.contains("Schedule|Earlier Start|Rescheduled", regex=True)].copy()
     s = s.sort_values("Extension_MH", ascending=False)
@@ -569,7 +580,8 @@ def _phase_and_schedule(wb, rows, transfers, issues):
                           widths={"Activity": 46, "Types": 40, "Implementation Status": 28}, autofilter=False)
     row += 2
     ws.cell(row, 1, "D. Double-counting risk register").font = Font(name=FONT, bold=True, size=11, color=NAVY)
-    risk = [i for i in issues if i["Area"] in ("Double counting", "Copilot model", "Phase transfer", "Duplicate project row", "Project code", "Possible copy-paste")]
+    risk = [i for i in issues if i["Area"] in ("Double counting", "Copilot model", "Phase transfer", "Possible transfer",
+                                               "Duplicate project row", "Project code", "Possible copy-paste")]
     dd = pd.DataFrame(risk)[["Severity", "Area", "Scenario", "File", "Issue", "Detail", "Impact_MH"]] if risk else pd.DataFrame()
     if len(dd):
         _write_table(ws, dd, row + 1, fmts={"Impact_MH": MH}, widths={"Issue": 50, "Detail": 90}, autofilter=False)
@@ -798,7 +810,7 @@ def _exec_summary(wb, dr_total, pr_first, findings, actions, meta):
         ws.column_dimensions[L(j)].width = w
 
 
-def write_workbook(path, *, rows, cells, transfers, ds, ps, mdf, cap, chk, inventory, issues, findings, actions, meta):
+def write_workbook(path, *, rows, cells, transfers, ds, ps, mdf, cap, chk, inventory, issues, findings, actions, meta, possible=None):
     wb = Workbook()
     wb.remove(wb.active)
     for name in ["Executive Summary", "Department Ranking", "Project Ranking", "Monthly Workload Impact",
@@ -817,7 +829,7 @@ def write_workbook(path, *, rows, cells, transfers, ds, ps, mdf, cap, chk, inven
     _deviation_register(wb, rows, ps)
     _cell_changes(wb, cells, rows)
     _new_projects(wb, rows)
-    _phase_and_schedule(wb, rows, transfers, issues)
+    _phase_and_schedule(wb, rows, transfers, issues, possible)
     _implementation(wb, rows, rr_last)
     _checklist(wb, chk)
     _dq(wb, inventory, issues)

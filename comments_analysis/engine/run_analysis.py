@@ -20,7 +20,7 @@ import openpyxl
 import pandas as pd
 
 from analysis import (DEPARTMENTS, checklist, copy_paste_check, department_summary, feedback_status, load_capacity,
-                      monthly, project_summary, suggest_codes)
+                      monthly, possible_transfers, project_summary, suggest_codes)
 from build_dataset import build
 from compare import three_way
 from powerbi_export import export_powerbi
@@ -71,7 +71,7 @@ def _title_only(name) -> str:
     return re.sub(r"^[\d\s,\-]+", "", str(name or ""))
 
 
-def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "") -> tuple[list[str], list[str]]:
+def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None) -> tuple[list[str], list[str]]:
     f = []
     P, F, I = ds["Planning_MH"].sum(), ds["Final_MH"].sum(), ds["Implemented_MH"].sum()
     inc, red = ds["Gross_Increase"].sum(), ds["Gross_Reduction"].sum()
@@ -113,6 +113,17 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "") -> tuple[list
     f.append(f"{len(ext)} rows extend the schedule beyond the baseline finish ({ext['Extension_MH'].sum():,.0f} MH falls after "
              "the planned end). Largest: " + "; ".join(f"{k} ({v.MH:,.0f} MH, {int(v.D)} dept{'s' if v.D > 1 else ''})"
                                                      for k, v in ext_top.iterrows()) + ".")
+    loan = rows[rows["Concern"] & (rows["Phase"] == "Loan To")]
+    if len(loan):
+        f.append(f"{len(loan)} Loan To rows were changed by {loan['DeptCode'].nunique()} departments (gross "
+                 f"{(loan['Gross_Increase'] - loan['Gross_Reduction']).sum():,.0f} MH); Loan To is Corporate Planning controlled, "
+                 "so these are requests, not edits.")
+    if possible is not None and len(possible):
+        top_pt = possible.sort_values("Possible Offset MH", ascending=False).iloc[0]
+        f.append(f"{len(possible)} reductions look like transfers to a new code or phase in the same department "
+                 f"({possible['Possible Offset MH'].sum():,.0f} MH would be counted twice in the gross figures), e.g. "
+                 f"{top_pt['Dept']}: {top_pt['Reduced Project']} {top_pt['Reduced Phase']} {top_pt['Reduction MH']:,.0f} MH against new "
+                 f"{top_pt['Added Project']} {top_pt['Added Phase']} +{top_pt['Added MH']:,.0f} MH.")
     moves = rows[rows["RequestedPhase"] != ""]
     if len(moves):
         f.append(f"{len(moves)} projects ({moves['P_Total'].sum():,.0f} MH) appear under a different phase in the feedback "
@@ -185,6 +196,14 @@ def main():
         issues.append(dict(Severity="Medium", Area="Project code", Scenario="Discipline Comment", File=s.DeptCode,
                            Issue="Uncoded feedback row - closest known project (verify)",
                            Detail=f"'{s.Activity}' -> {s.Suggested_Code or 'no close match'} ({s.Match:.0%})", Impact_MH=s.Final_MH))
+    possible = possible_transfers(rows)
+    for _, t in possible.iterrows():
+        issues.append(dict(Severity="High" if t["Possible Offset MH"] >= 5000 else "Medium", Area="Possible transfer",
+                           Scenario="Discipline Comment", File=str(t["Dept"]),
+                           Issue="Reduction paired with a new allocation of the same family or title (verify)",
+                           Detail=f"{t['Reduced Project']} {t['Reduced Phase']} {t['Reduction MH']:,.0f} MH vs {t['Added Project']} "
+                                  f"{t['Added Phase']} +{t['Added MH']:,.0f} MH ({t['Match Basis']})",
+                           Impact_MH=float(t["Possible Offset MH"])))
     cap = load_capacity(a.employees)
     fb = feedback_status(rows, df)
     ds = department_summary(rows, cells, cap, fb)
@@ -202,12 +221,12 @@ def main():
                 limitations="Original 'To Departments' and 'after' workbooks were not uploaded, so Planning Input and After "
                             "Implementation come from the validated Copilot table; 19 departments' feedback likewise. "
                             "Piping (2400-c.xlsx) feedback not provided. Headcount date unconfirmed.")
-    findings, actions = build_findings(ds, ps, rows, issues, mdf, cap, a.note)
+    findings, actions = build_findings(ds, ps, rows, issues, mdf, cap, a.note, possible)
     tag = a.cycle.replace(" ", "_")
     write_workbook(out / f"ENPPI_Workload_Comments_Analysis_{tag}.xlsx", rows=rows, cells=cells, transfers=transfers,
                    ds=ds, ps=ps, mdf=mdf, cap=cap, chk=chk, inventory=inv, issues=issues, findings=findings,
-                   actions=actions, meta=meta)
-    export_powerbi(out / "powerbi", df=df, cells=cells, rows=rows, ps=ps, cap=cap, issues=issues, cycle=a.cycle)
+                   actions=actions, meta=meta, possible=possible)
+    export_powerbi(out / "powerbi", df=df, cells=cells, rows=rows, ps=ps, cap=cap, issues=issues, cycle=a.cycle, possible=possible)
     pd.DataFrame(issues).to_csv(out / "issues_log.csv", index=False)
     print("\n".join(findings))
     print(f"\nWritten to {out}")
