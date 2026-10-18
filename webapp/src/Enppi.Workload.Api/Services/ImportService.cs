@@ -1,0 +1,412 @@
+using System.Globalization;
+using System.Text;
+using ClosedXML.Excel;
+using Enppi.Workload.Api.Auth;
+using Enppi.Workload.Api.Data;
+using Enppi.Workload.Api.Domain;
+using Microsoft.EntityFrameworkCore;
+
+namespace Enppi.Workload.Api.Services;
+
+public record ImportResult(int Created, int Updated, int Skipped, List<string> Warnings);
+
+/// <summary>A sheet read as header names + rows of raw cell values (string, double or DateTime).</summary>
+public record SheetData(List<string> Headers, List<object?[]> Rows);
+
+/// <summary>Imports the standard templates. Planning, proposals and after-implementation use one wide layout:
+/// Dept | SubDept | Category | ProjectCode | Activity | Planner | Reason | one column per month (date or "Jul-26").
+/// The comments analysis engine writes these files from the legacy department workbooks (export_webapp.py).</summary>
+public class ImportService(WorkloadDbContext db, CurrentUser user)
+{
+    public static readonly string[] ForecastColumns = { "Dept", "SubDept", "Category", "ProjectCode", "Activity", "Planner", "Reason" };
+
+    public static SheetData Read(Stream stream, string fileName)
+    {
+        if (fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)) return ReadCsv(stream);
+        using var wb = new XLWorkbook(stream);
+        var ws = wb.Worksheets.First();
+        var used = ws.RangeUsed() ?? throw new RuleException("The sheet is empty.");
+        int firstRow = used.FirstRow().RowNumber(), lastRow = used.LastRow().RowNumber(), lastCol = used.LastColumn().ColumnNumber();
+        var headers = Enumerable.Range(1, lastCol).Select(c => CellText(ws.Cell(firstRow, c))).ToList();
+        var rows = new List<object?[]>();
+        for (int r = firstRow + 1; r <= lastRow; r++)
+        {
+            var row = Enumerable.Range(1, lastCol).Select(c => CellValue(ws.Cell(r, c))).ToArray();
+            if (row.Any(v => v is not null && !(v is string s && s.Length == 0))) rows.Add(row);
+        }
+        return new SheetData(headers, rows);
+    }
+
+    private static string CellText(IXLCell c) => c.Value.IsDateTime ? c.Value.GetDateTime().ToString("yyyy-MM-dd") : c.GetString().Trim();
+
+    private static object? CellValue(IXLCell c)
+    {
+        var v = c.Value;
+        if (v.IsBlank) return null;
+        if (v.IsNumber) return v.GetNumber();
+        if (v.IsDateTime) return v.GetDateTime();
+        return v.ToString().Trim();
+    }
+
+    private static SheetData ReadCsv(Stream stream)
+    {
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        var lines = new List<List<string>>();
+        var text = reader.ReadToEnd();
+        var row = new List<string>();
+        var field = new StringBuilder();
+        bool quoted = false;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char ch = text[i];
+            if (quoted)
+            {
+                if (ch == '"' && i + 1 < text.Length && text[i + 1] == '"') { field.Append('"'); i++; }
+                else if (ch == '"') quoted = false;
+                else field.Append(ch);
+            }
+            else if (ch == '"') quoted = true;
+            else if (ch == ',') { row.Add(field.ToString()); field.Clear(); }
+            else if (ch == '\n' || ch == '\r')
+            {
+                if (ch == '\r' && i + 1 < text.Length && text[i + 1] == '\n') i++;
+                row.Add(field.ToString()); field.Clear();
+                if (row.Any(f => f.Length > 0)) lines.Add(row);
+                row = new List<string>();
+            }
+            else field.Append(ch);
+        }
+        row.Add(field.ToString());
+        if (row.Any(f => f.Length > 0)) lines.Add(row);
+        if (lines.Count == 0) throw new RuleException("The file is empty.");
+        object? Parse(string s) => s.Length == 0 ? null
+            : double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : s.Trim();
+        return new SheetData(lines[0].Select(h => h.Trim()).ToList(), lines.Skip(1).Select(r => r.Select(Parse).ToArray()).ToList());
+    }
+
+    private static readonly string[] MonthFormats = { "yyyy-MM-dd", "yyyy-MM", "MMM-yy", "MMM yy", "MMM-yyyy", "MMM yyyy", "MMMM yyyy", "M/d/yyyy", "d/M/yyyy" };
+
+    /// <summary>Header -> month index in the cycle; null when the header is not a month.</summary>
+    public static int? MonthIndex(string header, ForecastCycle c)
+    {
+        if (!DateTime.TryParseExact(header.Trim(), MonthFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) &&
+            !DateTime.TryParse(header, CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) return null;
+        int idx = (d.Year - c.FirstMonth.Year) * 12 + d.Month - c.FirstMonth.Month;
+        return idx;
+    }
+
+    private static string S(object? v) => v switch
+    {
+        null => "",
+        double d when Math.Abs(d - Math.Round(d)) < 1e-9 => ((long)d).ToString(CultureInfo.InvariantCulture),
+        double d => d.ToString(CultureInfo.InvariantCulture),
+        DateTime t => t.ToString("yyyy-MM-dd"),
+        _ => v.ToString()!.Trim(),
+    };
+
+    private static double? N(object? v) => v switch
+    {
+        null => null,
+        double d => d,
+        string s when s.Length == 0 => null,
+        string s when double.TryParse(s.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) => d,
+        _ => throw new RuleException($"'{v}' is not a number"),
+    };
+
+    private record ForecastRow(int RowNumber, string Dept, string Section, Category Category, string Code, string Activity,
+                               string Planner, string Reason, Dictionary<int, double?> Months);
+
+    private static List<ForecastRow> ParseForecast(SheetData sheet, ForecastCycle c, List<string> warnings)
+    {
+        int Col(string name) => sheet.Headers.FindIndex(h => string.Equals(h.Replace(" ", ""), name, StringComparison.OrdinalIgnoreCase));
+        int dept = Col("Dept"), sec = Col("SubDept"), cat = Col("Category"), code = Col("ProjectCode"), act = Col("Activity"),
+            plan = Col("Planner"), reason = Col("Reason");
+        if (dept < 0 || cat < 0 || code < 0) throw new RuleException("Columns Dept, Category and ProjectCode are required.");
+        var monthCols = sheet.Headers.Select((h, i) => (i, idx: ForecastColumns.Contains(h, StringComparer.OrdinalIgnoreCase) ? null : MonthIndex(h, c)))
+            .Where(x => x.idx != null).ToList();
+        if (monthCols.Count == 0) throw new RuleException("No month columns found (use dates or headers like Jul-26).");
+        int outside = monthCols.Count(x => x.idx < 0 || x.idx >= c.MonthCount);
+        if (outside > 0) warnings.Add($"{outside} month columns fall outside {c.Name} ({c.FirstMonth:MMM-yy} + {c.MonthCount} months) and were ignored.");
+        var rows = new List<ForecastRow>();
+        for (int r = 0; r < sheet.Rows.Count; r++)
+        {
+            var x = sheet.Rows[r];
+            object? At(int i) => i >= 0 && i < x.Length ? x[i] : null;
+            var codeText = S(At(code));
+            if (codeText.Length == 0) { warnings.Add($"Row {r + 2}: no project code - skipped."); continue; }
+            Category category;
+            try { category = Categories.Parse(S(At(cat))); }
+            catch (FormatException e) { warnings.Add($"Row {r + 2}: {e.Message} - skipped."); continue; }
+            var months = new Dictionary<int, double?>();
+            foreach (var (i, idx) in monthCols.Where(m => m.idx >= 0 && m.idx < c.MonthCount))
+            {
+                try { months[idx!.Value] = N(At(i)); }
+                catch (RuleException e) { warnings.Add($"Row {r + 2}, {sheet.Headers[i]}: {e.Message} - left blank."); months[idx!.Value] = null; }
+            }
+            var d = S(At(dept));
+            rows.Add(new ForecastRow(r + 2, d, S(At(sec)) is { Length: > 0 } s ? s : d, category, codeText, S(At(act)),
+                                     S(At(plan)), S(At(reason)), months));
+        }
+        return rows;
+    }
+
+    private static string Key(string dept, string sec, Category cat, string code, int occ) => $"{dept}|{sec}|{cat}|{code}|{occ}";
+
+    private static Dictionary<string, ForecastLine> LineIndex(IEnumerable<ForecastLine> lines)
+    {
+        var index = new Dictionary<string, ForecastLine>();
+        foreach (var g in lines.OrderBy(l => l.Id).GroupBy(l => (l.DeptCode, l.SectionCode, l.Category, l.ProjectCode)))
+        {
+            int occ = 0;
+            foreach (var l in g) index[Key(l.DeptCode, l.SectionCode, l.Category, l.ProjectCode, ++occ)] = l;
+        }
+        return index;
+    }
+
+    private async Task<ForecastCycle> OpenCycleAsync(int cycleId)
+    {
+        if (!user.IsCorporatePlanning) throw new ForbiddenException("Only Corporate Planning imports data.");
+        var c = await db.Cycles.FirstOrDefaultAsync(x => x.Id == cycleId) ?? throw new KeyNotFoundException($"Cycle {cycleId} not found");
+        if (c.Status == CycleStatus.Locked) throw new RuleException($"Cycle {c.Name} is locked.");
+        return c;
+    }
+
+    private async Task EnsureProjectsAsync(IEnumerable<ForecastRow> rows, List<string> warnings)
+    {
+        var known = (await db.Projects.Select(p => p.Code).ToListAsync()).ToHashSet();
+        foreach (var r in rows.Where(r => !known.Contains(r.Code)).GroupBy(r => r.Code))
+        {
+            db.Projects.Add(new Project { Code = r.Key, BaseCode = Rules.BaseCode(r.Key), Name = r.First().Activity, InMaster = false });
+            known.Add(r.Key);
+            warnings.Add($"Project {r.Key} is not in the project master; added as an unconfirmed code.");
+        }
+        var depts = (await db.Departments.Select(d => d.Code).ToListAsync()).ToHashSet();
+        foreach (var d in rows.Select(r => r.Dept).Distinct().Where(d => !depts.Contains(d)))
+            warnings.Add($"Department {d} is not in the department master; add it under Admin so its capacity is known.");
+    }
+
+    /// <summary>Planning Input (the "To Departments" values): creates lines or replaces planner values.</summary>
+    public async Task<ImportResult> ImportPlanningAsync(int cycleId, SheetData sheet)
+    {
+        var c = await OpenCycleAsync(cycleId);
+        var warnings = new List<string>();
+        var rows = ParseForecast(sheet, c, warnings);
+        await EnsureProjectsAsync(rows, warnings);
+        var index = LineIndex(await db.Lines.Include(l => l.Values).Where(l => l.CycleId == cycleId).ToListAsync());
+        var occ = new Dictionary<string, int>();
+        int created = 0, updated = 0;
+        foreach (var r in rows)
+        {
+            var baseKey = $"{r.Dept}|{r.Section}|{r.Category}|{r.Code}";
+            occ[baseKey] = occ.GetValueOrDefault(baseKey) + 1;
+            if (!index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line))
+            {
+                line = new ForecastLine { CycleId = cycleId, DeptCode = r.Dept, SectionCode = r.Section, Category = r.Category,
+                                          ProjectCode = r.Code, Activity = r.Activity, Origin = LineOrigin.Import };
+                db.Lines.Add(line);
+                created++;
+            }
+            else updated++;
+            if (r.Planner.Length > 0) line.PlannerUpn = r.Planner.ToLowerInvariant();
+            if (r.Activity.Length > 0) line.Activity = r.Activity;
+            foreach (var (m, val) in r.Months)
+            {
+                var v = line.Values.FirstOrDefault(x => x.MonthIndex == m);
+                if (v is null) line.Values.Add(v = new ForecastValue { MonthIndex = m });
+                v.PlannerMH = val;
+            }
+        }
+        db.Log(user.Upn, "ImportPlanning", "Cycle", cycleId.ToString(), cycleId, $"{created} created, {updated} updated");
+        await db.SaveChangesAsync();
+        return new ImportResult(created, updated, 0, warnings);
+    }
+
+    /// <summary>After-implementation extract (Primavera re-extract after planners implemented): fills AfterMH;
+    /// rows without a planning line are added (changes made by Planning without a comment).</summary>
+    public async Task<ImportResult> ImportAfterAsync(int cycleId, SheetData sheet)
+    {
+        var c = await OpenCycleAsync(cycleId);
+        var warnings = new List<string>();
+        var rows = ParseForecast(sheet, c, warnings);
+        await EnsureProjectsAsync(rows, warnings);
+        var lines = await db.Lines.Include(l => l.Values).Where(l => l.CycleId == cycleId).ToListAsync();
+        foreach (var v in lines.SelectMany(l => l.Values)) v.AfterMH = null;
+        var index = LineIndex(lines);
+        var occ = new Dictionary<string, int>();
+        int created = 0, updated = 0;
+        foreach (var r in rows)
+        {
+            var baseKey = $"{r.Dept}|{r.Section}|{r.Category}|{r.Code}";
+            occ[baseKey] = occ.GetValueOrDefault(baseKey) + 1;
+            if (!index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line))
+            {
+                line = new ForecastLine { CycleId = cycleId, DeptCode = r.Dept, SectionCode = r.Section, Category = r.Category,
+                                          ProjectCode = r.Code, Activity = r.Activity, Origin = LineOrigin.Import };
+                db.Lines.Add(line);
+                created++;
+            }
+            else updated++;
+            foreach (var (m, val) in r.Months)
+            {
+                var v = line.Values.FirstOrDefault(x => x.MonthIndex == m);
+                if (v is null) line.Values.Add(v = new ForecastValue { MonthIndex = m });
+                v.AfterMH = val ?? 0;
+            }
+        }
+        c.HasAfterData = true;
+        if (created > 0) warnings.Add($"{created} rows exist only in the after extract (added by Planning without a comment).");
+        db.Log(user.Upn, "ImportAfter", "Cycle", cycleId.ToString(), cycleId, $"{updated} matched, {created} after-only");
+        await db.SaveChangesAsync();
+        return new ImportResult(created, updated, 0, warnings);
+    }
+
+    /// <summary>Migration of department feedback files (-c workbooks): blank = no change; a row without a planning line
+    /// becomes a new-allocation request. Imported proposals are submitted on the department's behalf.</summary>
+    public async Task<ImportResult> ImportProposalsAsync(int cycleId, SheetData sheet)
+    {
+        var c = await OpenCycleAsync(cycleId);
+        var warnings = new List<string>();
+        var rows = ParseForecast(sheet, c, warnings);
+        await EnsureProjectsAsync(rows, warnings);
+        var lines = await db.Lines.Include(l => l.Values).Where(l => l.CycleId == cycleId).ToListAsync();
+        var index = LineIndex(lines);
+        var existing = await db.Proposals.Include(p => p.Values).Where(p => p.CycleId == cycleId).ToListAsync();
+        var occ = new Dictionary<string, int>();
+        int created = 0, updated = 0, skipped = 0;
+        var depts = new HashSet<string>();
+        foreach (var r in rows)
+        {
+            depts.Add(r.Dept);
+            var baseKey = $"{r.Dept}|{r.Section}|{r.Category}|{r.Code}";
+            occ[baseKey] = occ.GetValueOrDefault(baseKey) + 1;
+            var reason = r.Reason.Length > 0 ? r.Reason : "Imported from the department's feedback workbook";
+            if (index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line))
+            {
+                var planner = Enumerable.Range(0, c.MonthCount)
+                    .Select(m => line.Values.FirstOrDefault(v => v.MonthIndex == m)?.PlannerMH ?? 0).ToArray();
+                var proposed = Enumerable.Range(0, c.MonthCount).Select(m => r.Months.GetValueOrDefault(m)).ToArray();
+                var change = Rules.Classify(planner, proposed);
+                if (change.MonthsChanged.Count == 0) { skipped++; continue; }
+                var p = existing.FirstOrDefault(x => x.LineId == line.Id && x.Kind == ProposalKind.Change);
+                if (p is null) { p = new Proposal { CycleId = cycleId, LineId = line.Id, DeptCode = r.Dept, Kind = ProposalKind.Change, CreatedBy = user.Upn }; db.Proposals.Add(p); created++; }
+                else updated++;
+                p.Values.Clear();
+                foreach (var (m, val) in r.Months.Where(kv => kv.Value != null))
+                    p.Values.Add(new ProposalValue { MonthIndex = m, ProposedMH = val });
+                p.Reason = reason;
+                p.ChangeTypes = change.TypesText;
+                p.Status = ProposalStatus.Submitted;
+                p.SubmittedAt = DateTime.UtcNow;
+            }
+            else
+            {
+                if (r.Months.Values.All(v => (v ?? 0) < Rules.Tol)) { skipped++; continue; }
+                var p = new Proposal
+                {
+                    CycleId = cycleId, DeptCode = r.Dept, Kind = ProposalKind.NewAllocation, NewProjectCode = r.Code,
+                    NewActivity = r.Activity, NewCategory = r.Category, NewSectionCode = r.Section, Reason = reason,
+                    Status = ProposalStatus.Submitted, SubmittedAt = DateTime.UtcNow, CreatedBy = user.Upn, ChangeTypes = "New Project",
+                };
+                foreach (var (m, val) in r.Months.Where(kv => kv.Value != null)) p.Values.Add(new ProposalValue { MonthIndex = m, ProposedMH = val });
+                db.Proposals.Add(p);
+                created++;
+            }
+        }
+        foreach (var d in depts)
+        {
+            var rev = await db.DepartmentReviews.FirstOrDefaultAsync(x => x.CycleId == cycleId && x.DeptCode == d)
+                      ?? db.DepartmentReviews.Add(new DepartmentReview { CycleId = cycleId, DeptCode = d }).Entity;
+            rev.Status = DeptReviewStatus.Submitted;
+            rev.SubmittedAt = DateTime.UtcNow;
+            rev.SubmittedBy = user.Upn + " (import)";
+        }
+        db.Log(user.Upn, "ImportProposals", "Cycle", cycleId.ToString(), cycleId, $"{created} created, {updated} updated, {skipped} unchanged rows");
+        await db.SaveChangesAsync();
+        return new ImportResult(created, updated, skipped, warnings);
+    }
+
+    public async Task<ImportResult> ImportDepartmentsAsync(SheetData sheet)
+    {
+        if (!user.Is(Roles.Admin) && !user.IsCorporatePlanning) throw new ForbiddenException("Only administrators maintain reference data.");
+        int Col(string n) => sheet.Headers.FindIndex(h => string.Equals(h.Replace(" ", ""), n, StringComparison.OrdinalIgnoreCase));
+        int code = Col("Code"), name = Col("Name"), parent = Col("ParentCode"), perm = Col("Permanent"), temp = Col("Temporary"),
+            mgr = Col("Managers"), loan = Col("LoanToUnpaid");
+        if (code < 0 || name < 0) throw new RuleException("Columns Code and Name are required.");
+        int created = 0, updated = 0;
+        foreach (var r in sheet.Rows)
+        {
+            object? At(int i) => i >= 0 && i < r.Length ? r[i] : null;
+            var c = S(At(code));
+            if (c.Length == 0) continue;
+            var d = await db.Departments.FindAsync(c);
+            if (d is null) { db.Departments.Add(d = new Department { Code = c }); created++; } else updated++;
+            d.Name = S(At(name));
+            d.ParentCode = S(At(parent)) is { Length: > 0 } p ? p : null;
+            d.Permanent = (int)(N(At(perm)) ?? d.Permanent);
+            d.Temporary = (int)(N(At(temp)) ?? d.Temporary);
+            d.Managers = (int)(N(At(mgr)) ?? d.Managers);
+            d.LoanToUnpaid = (int)(N(At(loan)) ?? d.LoanToUnpaid);
+        }
+        db.Log(user.Upn, "ImportDepartments", "Department", "*", null, $"{created} created, {updated} updated");
+        await db.SaveChangesAsync();
+        return new ImportResult(created, updated, 0, new());
+    }
+
+    public async Task<ImportResult> ImportProjectsAsync(SheetData sheet)
+    {
+        if (!user.Is(Roles.Admin) && !user.IsCorporatePlanning) throw new ForbiddenException("Only administrators maintain reference data.");
+        int Col(string n) => sheet.Headers.FindIndex(h => string.Equals(h.Replace(" ", "").Replace("_", ""), n, StringComparison.OrdinalIgnoreCase));
+        int code = Col("Code") is >= 0 and var c1 ? c1 : Col("ProjectNo"), name = Col("Name") is >= 0 and var n1 ? n1 : Col("ProjectName"),
+            client = Col("Client") is >= 0 and var k1 ? k1 : Col("ClientShortName"), cat = Col("Category") is >= 0 and var t1 ? t1 : Col("ProjectCategory");
+        if (code < 0 || name < 0) throw new RuleException("Columns Code and Name are required.");
+        var all = await db.Projects.ToDictionaryAsync(p => p.Code);
+        int created = 0, updated = 0;
+        foreach (var r in sheet.Rows)
+        {
+            object? At(int i) => i >= 0 && i < r.Length ? r[i] : null;
+            var c = S(At(code));
+            if (c.Length == 0) continue;
+            if (!all.TryGetValue(c, out var p)) { db.Projects.Add(p = new Project { Code = c }); all[c] = p; created++; } else updated++;
+            p.BaseCode = Rules.BaseCode(c);
+            p.Name = S(At(name));
+            p.Client = S(At(client)) is { Length: > 0 } cl ? cl : p.Client;
+            p.MasterCategory = S(At(cat)) is { Length: > 0 } mc ? mc[..Math.Min(4, mc.Length)] : p.MasterCategory;
+            p.InMaster = true;
+        }
+        db.Log(user.Upn, "ImportProjects", "Project", "*", null, $"{created} created, {updated} updated");
+        await db.SaveChangesAsync();
+        return new ImportResult(created, updated, 0, new());
+    }
+
+    /// <summary>Blank template with the cycle's month headers.</summary>
+    public static byte[] Template(ForecastCycle c, string kind)
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.AddWorksheet("Forecast");
+        var headers = ForecastColumns.ToList();
+        for (int i = 0; i < headers.Count; i++) ws.Cell(1, i + 1).Value = headers[i];
+        for (int m = 0; m < c.MonthCount; m++)
+        {
+            var cell = ws.Cell(1, headers.Count + m + 1);
+            cell.Value = c.Month(m).ToDateTime(TimeOnly.MinValue);
+            cell.Style.DateFormat.Format = "mmm-yy";
+        }
+        ws.Row(1).Style.Font.Bold = true;
+        ws.Row(1).Style.Fill.BackgroundColor = XLColor.FromHtml("#1F3864");
+        ws.Row(1).Style.Font.FontColor = XLColor.White;
+        var notes = wb.AddWorksheet("How to fill");
+        notes.Cell(1, 1).Value = kind switch
+        {
+            "planning" => "Planning Input: one row per department / sub-department / category / project. Month cells hold man-hours.",
+            "proposals" => "Department proposals: leave a month blank to keep the planner value; type 0 only to remove the work. Reason is required.",
+            _ => "After implementation: the Primavera re-extract after planners implemented the approved changes.",
+        };
+        notes.Cell(2, 1).Value = "Category: Running, Internal / Unforeseen, Loan To, Under Signature, Proposal, Potential Opportunity.";
+        notes.Cell(3, 1).Value = "ProjectCode: the full code, e.g. 5248200-1 or 40061420 (never truncated).";
+        ws.SheetView.FreezeRows(1);
+        ws.Columns(1, 7).AdjustToContents();
+        using var ms = new MemoryStream();
+        wb.SaveAs(ms);
+        return ms.ToArray();
+    }
+}

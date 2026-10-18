@@ -1,0 +1,12 @@
+bin/
+obj/
+*.db
+*.db-shm
+*.db-wal
+node_modules/
+src/Enppi.Workload.Api/wwwroot/
+frontend/dist/
+e2e/test-results/
+e2e/playwright-report/
+*.user
+.vs/
