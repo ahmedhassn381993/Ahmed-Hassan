@@ -112,8 +112,9 @@ RequestedCategory, then one column per month. Download a blank template per cycl
 ## Power BI
 
 **Reports → Power BI data (.zip)** writes the same star schema as the comments analysis engine (FactWorkload,
-FactCommentItems, Dim*…). So `comments_analysis/powerbi/Workload_Comments_Analysis.pbit` reads application data and
-engine output alike.
+FactCommentItems, Dim*…). So the Power BI template reads application data and engine output alike. The template is
+`Workload_Comments_Analysis.pbit`, built by `comments_analysis/powerbi/build_pbit.py` and delivered with the analysis
+outputs, not stored in this repository.
 
 On Azure SQL, `deploy/sql/02_reporting_views.sql` adds read-only reporting views:
 
