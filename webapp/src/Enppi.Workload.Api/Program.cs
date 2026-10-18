@@ -5,7 +5,6 @@ using Enppi.Workload.Api.Data;
 using Enppi.Workload.Api.Domain;
 using Enppi.Workload.Api.Services;
 using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -64,19 +63,25 @@ using (var scope = app.Services.CreateScope())
 // ------------------------------------------------------------------ errors: rule breaks are 400, scope breaks 403
 app.UseExceptionHandler(e => e.Run(async ctx =>
 {
-    var ex = ctx.Features.Get<IExceptionHandlerFeature>()?.Error;
-    (int code, string message) = ex switch
-    {
-        RuleException r => (400, r.Message),
-        ForbiddenException f => (403, f.Message),
-        KeyNotFoundException k => (404, k.Message),
-        BadHttpRequestException b => (400, b.Message),
-        _ => (500, "Unexpected error - the details are in the application log."),
-    };
-    if (code == 500) app.Logger.LogError(ex, "Unhandled error");
-    ctx.Response.StatusCode = code;
-    await ctx.Response.WriteAsJsonAsync(new { error = message });
+    ctx.Response.StatusCode = 500;
+    await ctx.Response.WriteAsJsonAsync(new { error = "Unexpected error - the details are in the application log." });
 }));
+app.Use(async (ctx, next) =>
+{
+    try { await next(); }
+    catch (Exception ex) when (ex is RuleException or ForbiddenException or KeyNotFoundException or BadHttpRequestException)
+    {
+        (int code, string message) = ex switch
+        {
+            ForbiddenException => (403, ex.Message),
+            KeyNotFoundException => (404, ex.Message),
+            _ => (400, ex.Message),
+        };
+        app.Logger.LogInformation("{Method} {Path} refused ({Code}): {Message}", ctx.Request.Method, ctx.Request.Path, code, message);
+        ctx.Response.StatusCode = code;
+        await ctx.Response.WriteAsJsonAsync(new { error = message });
+    }
+});
 
 if (app.Environment.IsDevelopment() || config.GetValue("Swagger:Enabled", false))
 {

@@ -46,6 +46,7 @@ public class ApiWorkflowTests : IClassFixture<AppFactory>
     private const string Cp = "cp.lead@enppi.demo", Elec = "gm.electrical@enppi.demo", Process = "gm.process@enppi.demo",
         Planner1 = "planner.one@enppi.demo", Viewer = "viewer@enppi.demo";
     private readonly AppFactory _app;
+    private static readonly int ImportColumns = Enppi.Workload.Api.Services.ImportService.ForecastColumns.Length;
     private static readonly JsonSerializerOptions J = new(JsonSerializerDefaults.Web);
 
     public ApiWorkflowTests(AppFactory app) => _app = app;
@@ -70,7 +71,7 @@ public class ApiWorkflowTests : IClassFixture<AppFactory>
         {
             ws.Cell(r, 1).Value = dept; ws.Cell(r, 2).Value = dept; ws.Cell(r, 3).Value = cat; ws.Cell(r, 4).Value = code;
             ws.Cell(r, 5).Value = act; ws.Cell(r, 6).Value = planner;
-            for (int m = 0; m < months.Length; m++) ws.Cell(r, 8 + m).Value = months[m];
+            for (int m = 0; m < months.Length; m++) ws.Cell(r, ImportColumns + 1 + m).Value = months[m];
         }
         Row(2, "2500", "Running", "9100100", "Gas plant", Planner1, 100, 100, 100, 100);
         Row(3, "2500", "Loan To", "9100200-1", "Site support", Planner1, 50, 50);

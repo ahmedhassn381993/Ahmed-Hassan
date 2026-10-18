@@ -18,7 +18,7 @@ public record SheetData(List<string> Headers, List<object?[]> Rows);
 /// The comments analysis engine writes these files from the legacy department workbooks (export_webapp.py).</summary>
 public class ImportService(WorkloadDbContext db, CurrentUser user)
 {
-    public static readonly string[] ForecastColumns = { "Dept", "SubDept", "Category", "ProjectCode", "Activity", "Planner", "Reason" };
+    public static readonly string[] ForecastColumns = { "Dept", "SubDept", "Category", "ProjectCode", "Activity", "Planner", "Reason", "Occurrence", "RequestedCategory" };
 
     public static SheetData Read(Stream stream, string fileName)
     {
@@ -37,7 +37,12 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         return new SheetData(headers, rows);
     }
 
-    private static string CellText(IXLCell c) => c.Value.IsDateTime ? c.Value.GetDateTime().ToString("yyyy-MM-dd") : c.GetString().Trim();
+    /// <summary>Header text; month headers saved as Excel date serials (a custom "mmm-yy" format is not always recognised
+    /// as a date) are turned back into dates.</summary>
+    private static string CellText(IXLCell c) =>
+        c.Value.IsDateTime ? c.Value.GetDateTime().ToString("yyyy-MM-dd")
+        : c.Value.IsNumber && c.Value.GetNumber() is >= 20000 and <= 80000 ? DateTime.FromOADate(c.Value.GetNumber()).ToString("yyyy-MM-dd")
+        : c.GetString().Trim();
 
     private static object? CellValue(IXLCell c)
     {
@@ -113,14 +118,17 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         _ => throw new RuleException($"'{v}' is not a number"),
     };
 
+    /// <summary>Occurrence: which of several rows with the same department / sub-department / category / code this is
+    /// (1, 2...). Optional; without it rows are numbered in file order, which is only safe for complete files.</summary>
     private record ForecastRow(int RowNumber, string Dept, string Section, Category Category, string Code, string Activity,
-                               string Planner, string Reason, Dictionary<int, double?> Months);
+                               string Planner, string Reason, Dictionary<int, double?> Months, int? Occurrence,
+                               Category? RequestedCategory);
 
     private static List<ForecastRow> ParseForecast(SheetData sheet, ForecastCycle c, List<string> warnings)
     {
         int Col(string name) => sheet.Headers.FindIndex(h => string.Equals(h.Replace(" ", ""), name, StringComparison.OrdinalIgnoreCase));
         int dept = Col("Dept"), sec = Col("SubDept"), cat = Col("Category"), code = Col("ProjectCode"), act = Col("Activity"),
-            plan = Col("Planner"), reason = Col("Reason");
+            plan = Col("Planner"), reason = Col("Reason"), occCol = Col("Occurrence"), reqCol = Col("RequestedCategory");
         if (dept < 0 || cat < 0 || code < 0) throw new RuleException("Columns Dept, Category and ProjectCode are required.");
         var monthCols = sheet.Headers.Select((h, i) => (i, idx: ForecastColumns.Contains(h, StringComparer.OrdinalIgnoreCase) ? null : MonthIndex(h, c)))
             .Where(x => x.idx != null).ToList();
@@ -144,8 +152,15 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
                 catch (RuleException e) { warnings.Add($"Row {r + 2}, {sheet.Headers[i]}: {e.Message} - left blank."); months[idx!.Value] = null; }
             }
             var d = S(At(dept));
+            var occ = N(At(occCol)) is double o && o >= 1 ? (int?)(int)o : null;
+            Category? requested = null;
+            if (S(At(reqCol)) is { Length: > 0 } rc)
+            {
+                try { requested = Categories.Parse(rc); }
+                catch (FormatException e) { warnings.Add($"Row {r + 2}: {e.Message} - category request ignored."); }
+            }
             rows.Add(new ForecastRow(r + 2, d, S(At(sec)) is { Length: > 0 } s ? s : d, category, codeText, S(At(act)),
-                                     S(At(plan)), S(At(reason)), months));
+                                     S(At(plan)), S(At(reason)), months, occ, requested));
         }
         return rows;
     }
@@ -198,7 +213,7 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         foreach (var r in rows)
         {
             var baseKey = $"{r.Dept}|{r.Section}|{r.Category}|{r.Code}";
-            occ[baseKey] = occ.GetValueOrDefault(baseKey) + 1;
+            occ[baseKey] = r.Occurrence ?? occ.GetValueOrDefault(baseKey) + 1;
             if (!index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line))
             {
                 line = new ForecastLine { CycleId = cycleId, DeptCode = r.Dept, SectionCode = r.Section, Category = r.Category,
@@ -237,7 +252,7 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         foreach (var r in rows)
         {
             var baseKey = $"{r.Dept}|{r.Section}|{r.Category}|{r.Code}";
-            occ[baseKey] = occ.GetValueOrDefault(baseKey) + 1;
+            occ[baseKey] = r.Occurrence ?? occ.GetValueOrDefault(baseKey) + 1;
             if (!index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line))
             {
                 line = new ForecastLine { CycleId = cycleId, DeptCode = r.Dept, SectionCode = r.Section, Category = r.Category,
@@ -278,7 +293,7 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         {
             depts.Add(r.Dept);
             var baseKey = $"{r.Dept}|{r.Section}|{r.Category}|{r.Code}";
-            occ[baseKey] = occ.GetValueOrDefault(baseKey) + 1;
+            occ[baseKey] = r.Occurrence ?? occ.GetValueOrDefault(baseKey) + 1;
             var reason = r.Reason.Length > 0 ? r.Reason : "Imported from the department's feedback workbook";
             if (index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line))
             {
@@ -286,7 +301,18 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
                     .Select(m => line.Values.FirstOrDefault(v => v.MonthIndex == m)?.PlannerMH ?? 0).ToArray();
                 var proposed = Enumerable.Range(0, c.MonthCount).Select(m => r.Months.GetValueOrDefault(m)).ToArray();
                 var change = Rules.Classify(planner, proposed);
-                if (change.MonthsChanged.Count == 0) { skipped++; continue; }
+                if (r.RequestedCategory is { } rc && rc != line.Category)
+                {
+                    // the department filed the project under another category: a category-change request
+                    var cr = existing.FirstOrDefault(x => x.LineId == line.Id && x.Kind == ProposalKind.CategoryChange);
+                    if (cr is null) { cr = new Proposal { CycleId = cycleId, LineId = line.Id, DeptCode = r.Dept, Kind = ProposalKind.CategoryChange, CreatedBy = user.Upn }; db.Proposals.Add(cr); created++; }
+                    cr.RequestedCategory = rc;
+                    cr.Reason = reason;
+                    cr.ChangeTypes = "Phase Transfer";
+                    cr.Status = ProposalStatus.Submitted;
+                    cr.SubmittedAt = DateTime.UtcNow;
+                }
+                if (change.MonthsChanged.Count == 0) { if (r.RequestedCategory is null) skipped++; continue; }
                 var p = existing.FirstOrDefault(x => x.LineId == line.Id && x.Kind == ProposalKind.Change);
                 if (p is null) { p = new Proposal { CycleId = cycleId, LineId = line.Id, DeptCode = r.Dept, Kind = ProposalKind.Change, CreatedBy = user.Upn }; db.Proposals.Add(p); created++; }
                 else updated++;

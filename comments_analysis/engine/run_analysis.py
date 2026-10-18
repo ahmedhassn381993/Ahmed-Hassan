@@ -25,6 +25,7 @@ from analysis import (DEPARTMENTS, attach_master, checklist, company_peaks, copy
                       feedback_status, load_capacity, load_master, load_tracker, monthly, possible_transfers, project_summary,
                       section_breakdown, suggest_codes)
 from compare import _norm_name
+from export_webapp import export_webapp
 from build_dataset import build
 from compare import three_way
 from powerbi_export import export_powerbi
@@ -411,6 +412,7 @@ def main():
     ap.add_argument("--tracker", help="workflow tracker with the 'Disciplines Review' sent/received dates")
     ap.add_argument("--out", required=True)
     ap.add_argument("--note", default="", help="context sentence added to the implementation finding")
+    ap.add_argument("--webapp-export", help="also write import files for the Workload Forecast web application here")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -514,6 +516,8 @@ def main():
     export_powerbi(out / "powerbi", df=df, cells=cells, rows=rows, ps=ps, cap=cap, issues=issues, cycle=a.cycle,
                    possible=all_pairs, fb=fb, inventory=inv)
     pd.DataFrame(issues).to_csv(out / "issues_log.csv", index=False)
+    if a.webapp_export:
+        print("web application import files:", export_webapp(Path(a.webapp_export), rows=rows, cells=cells, cap=cap))
     print("\n".join(findings))
     print("\nACTIONS\n" + "\n".join(actions))
     print(f"\nWritten to {out}")
