@@ -1,0 +1,16 @@
+# Copy to .github/workflows/webapp-ci.yml to run the build and tests on GitHub for every pull request.
+name: webapp-ci
+on:
+  pull_request: { paths: [ 'webapp/**' ] }
+  push: { branches: [ main ], paths: [ 'webapp/**' ] }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 8.0.x }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd webapp && ./deploy/publish.sh
+      - run: cd webapp/e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test

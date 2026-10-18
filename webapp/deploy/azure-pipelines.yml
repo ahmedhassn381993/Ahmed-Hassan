@@ -1,0 +1,54 @@
+# Azure DevOps: build and test on every change; deploy to UAT, then to production after business and IT approval
+# (approvals are set on the 'workload-uat' and 'workload-prod' environments in Azure DevOps).
+trigger:
+  branches: { include: [ main ] }
+  paths: { include: [ webapp/* ] }
+
+variables:
+  azureSubscription: 'ENPPI-Workload-ServiceConnection'
+
+stages:
+  - stage: Build
+    jobs:
+      - job: build
+        pool: { vmImage: ubuntu-latest }
+        steps:
+          - task: UseDotNet@2
+            inputs: { packageType: sdk, version: 8.0.x }
+          - task: NodeTool@0
+            inputs: { versionSpec: 22.x }
+          - script: cd webapp && ./deploy/publish.sh
+            displayName: Build, test and publish
+          - script: |
+              cd webapp/e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test
+            displayName: Browser workflow tests (demo data)
+          - publish: webapp/artifacts/workload-portal.zip
+            artifact: portal
+
+  - stage: UAT
+    dependsOn: Build
+    jobs:
+      - deployment: uat
+        environment: workload-uat
+        pool: { vmImage: ubuntu-latest }
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebApp@1
+                  inputs: { azureSubscription: $(azureSubscription), appType: webAppLinux, appName: enppi-workload-uat-web,
+                            package: $(Pipeline.Workspace)/portal/workload-portal.zip }
+
+  - stage: Production
+    dependsOn: UAT
+    jobs:
+      - deployment: prod
+        environment: workload-prod
+        pool: { vmImage: ubuntu-latest }
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebApp@1
+                  inputs: { azureSubscription: $(azureSubscription), appType: webAppLinux, appName: enppi-workload-prod-web,
+                            package: $(Pipeline.Workspace)/portal/workload-portal.zip }

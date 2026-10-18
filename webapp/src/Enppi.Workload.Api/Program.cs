@@ -23,6 +23,13 @@ builder.Services.AddDbContext<WorkloadDbContext>(o =>
 
 // ------------------------------------------------------------------ sign-in: Entra ID through App Service Authentication
 var authMode = config["Auth:Mode"] ?? AuthModes.EasyAuth;
+// The Entra principal header is only trustworthy when App Service Authentication is switched on (the platform then strips
+// any incoming X-MS-* header). Refuse to start otherwise, unless a trusted reverse proxy is declared explicitly.
+if (authMode == AuthModes.EasyAuth && !builder.Environment.IsEnvironment("Testing") &&
+    !string.Equals(Environment.GetEnvironmentVariable("WEBSITE_AUTH_ENABLED"), "True", StringComparison.OrdinalIgnoreCase) &&
+    !config.GetValue("Auth:TrustPrincipalHeader", false))
+    throw new InvalidOperationException("Auth:Mode EasyAuth requires App Service Authentication (WEBSITE_AUTH_ENABLED=True) " +
+                                        "or Auth:TrustPrincipalHeader=true behind a trusted proxy that sets X-MS-CLIENT-PRINCIPAL.");
 builder.Services.AddScoped<PrincipalFactory>();
 builder.Services.AddAuthentication(authMode)
     .AddScheme<AuthenticationSchemeOptions, EasyAuthHandler>(AuthModes.EasyAuth, _ => { })
