@@ -132,13 +132,21 @@ def _pair_phase_moves(df: pd.DataFrame, issues: list[dict]) -> pd.DataFrame:
     ik = set(map(tuple, i[KEY].values))
     orphan_i = i[[tuple(x) not in known for x in i[KEY].values]]
     free_p = p[[tuple(x) not in ik for x in p[KEY].values]]
+    # phases that still have rows in each after file: a lost heading merges its whole block into the phase above,
+    # so the planning phase is then empty in the after file; a phase that still has rows means the planner
+    # deliberately filed the project elsewhere, which is reported as a category change, not re-keyed
+    i_phases = set(zip(i["DeptCode"], i["SectionCode"], i["Phase"]))
     paired: dict[str, list[str]] = {}
+    moved: dict[str, list[str]] = {}
     for _, ni in orphan_i.iterrows():
         m = free_p[(free_p["DeptCode"] == ni.DeptCode) & (free_p["SectionCode"] == ni.SectionCode) &
                    (free_p["ProjectKey"] == ni.ProjectKey) & (free_p["Phase"] != ni.Phase)]
         if m.empty:
             continue
         mp = m.iloc[0]
+        if (ni.DeptCode, ni.SectionCode, mp.Phase) in i_phases:
+            moved.setdefault(ni.DeptCode, []).append(f"{ni.ProjectKey}: {mp.Phase} -> {ni.Phase}")
+            continue
         free_p = free_p.drop(m.index[0])
         sel = ((df["Scenario"] == "System Implementation") & (df["DeptCode"] == ni.DeptCode) &
                (df["SectionCode"] == ni.SectionCode) & (df["Phase"] == ni.Phase) & (df["ProjectKey"] == ni.ProjectKey))
@@ -147,6 +155,10 @@ def _pair_phase_moves(df: pd.DataFrame, issues: list[dict]) -> pd.DataFrame:
     for dept, moves in paired.items():
         issues.append(dict(Severity="Medium", Area="After-implementation data", Scenario="System Implementation", File=dept,
                            Issue="After rows filed under another phase (missing phase headings) - paired to planning by code",
+                           Detail="; ".join(moves), Impact_MH=None))
+    for dept, moves in moved.items():
+        issues.append(dict(Severity="Medium", Area="After-implementation data", Scenario="System Implementation", File=dept,
+                           Issue="Planner filed a project under another category after implementation (not paired - confirm)",
                            Detail="; ".join(moves), Impact_MH=None))
     return df
 

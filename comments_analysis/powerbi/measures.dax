@@ -124,11 +124,11 @@ WL% (Implemented) = [Projects Total% (Implemented)] + [Proposal% (Implemented)] 
 // [9 Bridge and coverage]
 New Work MH = SUM ( FactCommentItems[Bridge New Work MH] )
 Increase Within Schedule MH = SUM ( FactCommentItems[Bridge Increase MH] )
-Schedule Extension MH = SUM ( FactCommentItems[Bridge Extension MH] )
+Extension or Earlier Start MH = SUM ( FactCommentItems[Bridge Extension MH] )
 Reduction Within Schedule MH = SUM ( FactCommentItems[Bridge Reduction MH] )
 Removed Allocation MH = SUM ( FactCommentItems[Bridge Removed MH] )
 Bridge Check MH =
-    [New Work MH] + [Increase Within Schedule MH] + [Schedule Extension MH] + [Reduction Within Schedule MH]
+    [New Work MH] + [Increase Within Schedule MH] + [Extension or Earlier Start MH] + [Reduction Within Schedule MH]
         + [Removed Allocation MH]
         - [Net Change MH]
 Possible Transfer MH = SUM ( PossibleTransfers[Possible Offset MH] )

@@ -91,7 +91,12 @@ def feedback_status(rows: pd.DataFrame, df: pd.DataFrame, tracker: dict | None =
         commented = file.endswith("-c.xlsx")
         tr = tracker.get(dept, {})
         if commented:
-            status = "Feedback received - changes" if r["Concern"].any() else "Feedback received - no MH change"
+            if r["Concern"].any():
+                status = "Feedback received - changes"
+            elif tr and not tr.get("Sent"):
+                status = "Feedback received - not in the tracker's review round (no MH change)"
+            else:
+                status = "Feedback received - no MH change"
         elif tr.get("Received"):
             status = f"Comments received {tr['Received']:%d-%b-%y} (tracker) - file not provided"
         elif tr:

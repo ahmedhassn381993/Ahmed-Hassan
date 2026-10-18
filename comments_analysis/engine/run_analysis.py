@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import re
+import textwrap
 from pathlib import Path
 
 import openpyxl
@@ -80,7 +81,12 @@ def file_inventory(df: pd.DataFrame, fb: pd.DataFrame) -> pd.DataFrame:
 
 def _title_only(name) -> str:
     """Drop the leading project code from an activity title."""
-    return re.sub(r"^[\d\s,\-]+", "", str(name or "")).strip()
+    return " ".join(re.sub(r"^[\d\s,\-]+", "", str(name or "")).split())
+
+
+def _short(text: str, width: int = 45) -> str:
+    """Shorten a title at a word boundary for management text."""
+    return textwrap.shorten(text, width=width, placeholder="...")
 
 
 TITLE_STOP = {"adnoc", "project", "projects", "phase", "plant", "works", "work", "epc", "the", "for", "and", "services",
@@ -127,6 +133,7 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
     proc = ds[ds["Feedback_Processed"]]
     with_changes = ds[ds["Feedback_Status"] == "Feedback received - changes"]
     unchanged = ds[ds["Feedback_Status"] == "Feedback received - no MH change"]
+    not_round = ds[ds["Feedback_Status"].str.contains("not in the tracker's review round", regex=False)]
     missing = ds[~ds["Feedback_Processed"]]
     not_recv = missing[missing["Feedback_Status"].str.startswith("No comments received")]
     not_prov = missing[missing["Feedback_Status"].str.contains("file not provided")]
@@ -136,7 +143,9 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
     t = (f"Departments asked for a net {net:+,.0f} MH ({net / P:+.1%}) on a Planning Input of {P:,.0f} MH "
          f"(gross +{inc:,.0f} / {red:,.0f}). Feedback was processed for {len(proc)} of {len(ds)} departments, covering "
          f"{proc['Planning_MH'].sum():,.0f} MH ({proc['Planning_MH'].sum() / P:.0%}) of Planning Input; {len(with_changes)} changed figures"
-         + (f" and {_depts(unchanged['DeptCode'])} returned comments without MH changes" if len(unchanged) else "") + ".")
+         + (f"; {_depts(unchanged['DeptCode'])} returned comments without MH changes" if len(unchanged) else "")
+         + (f"; {_depts(not_round['DeptCode'])} is not in the tracker's review round and its -c file has no MH change"
+            if len(not_round) else "") + ".")
     if len(missing):
         parts = []
         if len(not_recv):
@@ -173,9 +182,18 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
 
     # 4 severity
     crit = ps[ps["Severity"] == "Critical"]
-    broad = ps.sort_values(["Depts_Concerned", "Gross_Increase"], ascending=False).head(4)
-    f.append(f"{len(crit)} projects rated Critical and {int((ps['Severity'] == 'High').sum())} High. Broadest concern: " + "; ".join(
-        f"{r.ProjectFull} ({int(r.Depts_Concerned)} depts, {r.Net_Change:+,.0f} MH)" for r in broad.itertuples()) + ".")
+    tiers = []
+    for n, g in ps[ps["Depts_Concerned"] > 0].sort_values("Gross_Increase", ascending=False).groupby("Depts_Concerned", sort=False):
+        tiers.append((int(n), g))
+    tiers = sorted(tiers, key=lambda x: -x[0])[:2]
+    parts = []
+    for n, g in tiers:
+        lead = g.head(2)
+        names = _and(f"{r.ProjectFull} ({r.Net_Change:+,.0f} MH)" for r in lead.itertuples())
+        parts.append(f"{len(g)} project{'s' if len(g) > 1 else ''} raised by {n} departments"
+                     + (f": {names}" if len(g) <= 2 else f", led by {names}"))
+    f.append(f"{len(crit)} projects rated Critical and {int((ps['Severity'] == 'High').sum())} High. Broadest concern: "
+             + "; then ".join(parts) + ".")
 
     # 5 new allocations, with title variants, master flags and copy-paste caveats
     newp = rows[rows["Concern_Types"].str.contains("New Project|New Phase")]
@@ -187,10 +205,10 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
         tg = _title_clusters(sub)
         d = f"{int(v.D)} dept{'s' if v.D > 1 else ''}"
         if len(tg) == 1:
-            txt = f"{code} {tg[0][0][:48]} ({v.MH:,.0f} MH, {d})"
+            txt = f"{code} {_short(tg[0][0])} ({v.MH:,.0f} MH, {d})"
         else:
             txt = (f"{code} ({v.MH:,.0f} MH, {d}) used for {len(tg)} different works ("
-                   + "; ".join(f"{t[:40]} {mh:,.0f} MH" for t, mh in tg) + ")")
+                   + "; ".join(f"{_short(t, 40)} {mh:,.0f} MH" for t, mh in tg) + ")")
         flag = str(sub["Master_Flag"].iloc[0]) if "Master_Flag" in sub else ""
         if flag.startswith("Internal / overhead"):
             txt += f"; the project master lists {code} as '{str(sub['Master_Name'].iloc[0]).strip().title()}', so a project code is still to be assigned"
@@ -200,22 +218,30 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
         if cp:
             txt += f"; its monthly profile repeats another project's in {cp[0]['File']} (possible copy-paste - confirm)"
         parts.append(txt)
-    f.append(f"{len(newp)} new allocations ({newp['Final_Total'].sum():,.0f} MH) were requested; the largest are " + "; ".join(parts)
-             + f". {int((~newp['I_Exists']).sum())} of them are absent from the after-implementation data.")
+    n_phase = int(newp["Primary_Type"].eq("New Phase Allocation").sum())
+    f.append(f"{len(newp)} new allocations ({len(newp) - n_phase} new projects, {n_phase} new phase allocations; "
+             f"{newp['Final_Total'].sum():,.0f} MH) were requested; the largest are " + "; ".join(parts)
+             + f". Only {int(newp['I_Exists'].sum())} of the {len(newp)} appear in the after-implementation data.")
 
     # 6 implementation
     gap_dep = ds[~ds["Feedback_Processed"]]
     gap = gap_dep["Unrequested_Gross"].sum()
-    big_gap = gap_dep.sort_values("Unrequested_Gross", ascending=False).iloc[0] if len(gap_dep) else None
+    gap_prov = not_prov["Unrequested_Gross"].sum()
+    silent = missing[~missing.index.isin(not_prov.index)]
+    gap_silent = silent["Unrequested_Gross"].sum()
+    big_silent = silent.sort_values("Unrequested_Gross", ascending=False).iloc[0] if len(silent) else None
     unreq_net = ds["Unrequested_Net"].sum()
     share = "essentially all" if abs(I - P) > 0 and abs(unreq_net - (I - P)) <= 0.05 * abs(I - P) else "most"
     f.append(f"Implementation: of {req:,.0f} MH of requested change, about {impl:,.0f} MH ({impl / req:.0%}) appears in the "
              f"after-implementation extract. Separately, the extract differs from Planning Input by {unreq:,.0f} MH (gross) "
              f"in cells where no department asked for a change, so {share} of the {I - P:+,.0f} MH movement is not explained by "
              "comments and should be reconciled before the extract is used as 'final'."
-             + (f" {gap:,.0f} MH of that gross movement is in departments whose comments were not processed, where it may be "
-                f"implemented comments rather than planner changes (largest {big_gap.DeptCode}, {big_gap.Unrequested_Gross:,.0f} MH)."
-                if gap >= 1 and big_gap is not None else "")
+             + (f" Of that gross movement, {gap_prov:,.0f} MH is in {_depts(not_prov['DeptCode'])}, whose comments were sent but "
+                "not provided (it may be implemented comments)," if gap_prov >= 1 else " Of that gross movement,")
+             + (f" {gap_silent:,.0f} MH is in departments that sent no comments ({_depts(silent['DeptCode'])}; largest "
+                f"{big_silent.DeptCode}, {big_silent.Unrequested_Gross:,.0f} MH), so it is planner change without any comment, and "
+                if gap_silent >= 1 and big_silent is not None else "")
+             + f" {unreq - gap:,.0f} MH is in departments whose comments were processed."
              + (f" {note}" if note else ""))
 
     # 7 schedule extensions
@@ -254,15 +280,21 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
     # 10 code corrections
     cc = rows[rows["CodeCorrection"] != ""]
     if len(cc):
-        paired = cc[~cc["CodeCorrection"].str.contains("typed in column A")]
-        txt = (f"{len(cc)} rows carry a code change by the department: "
-               + "; ".join(f"{r.DeptCode} {r.CodeCorrection.replace(' (typed in column A)', ', typed in column A')} "
-                           f"({r.Final_Total:,.0f} MH)" for r in cc.itertuples()) + ".")
-        if len(paired):
-            alt = paired["Final_Total"].sum()
-            txt += (f" Paired rows are compared with their baseline, not counted as new work plus a retained baseline; counted that "
-                    f"way the company net would be {net + alt:+,.0f} MH ({alt:+,.0f} MH).")
-        f.append(txt + " Confirm each code in Primavera.")
+        notes = []
+        for r in cc.itertuples():
+            old, new = r.CodeCorrection.split(" (")[0].split(" -> ")
+            if "typed in column A" not in r.CodeCorrection:
+                notes.append(f"{r.DeptCode} re-coded {old} as {new} ({r.Final_Total:,.0f} MH); it is paired with its baseline - "
+                             f"counted as new work with the baseline retained, the company net would be "
+                             f"{net + r.Final_Total:+,.0f} MH ({r.Final_Total:+,.0f})")
+            elif r.P_Exists:
+                notes.append(f"{r.DeptCode} typed {new} in column A on the {old} row ({r.Final_Total:,.0f} MH); the activity code is "
+                             f"kept - if {new} is confirmed, that MH belongs to {new} instead (as new work with the "
+                             f"{r.P_Total:,.0f} MH baseline retained, the net would rise by a further {r.P_Total:,.0f} MH)")
+            else:
+                notes.append(f"{r.DeptCode} typed {new} in column A on a new {old} row ({r.Final_Total:,.0f} MH), "
+                             "a new allocation under either code")
+        f.append(f"{len(cc)} rows carry a code change by the department: " + "; ".join(notes) + ". Confirm each code in Primavera.")
 
     # 11 phase moves
     moves = rows[rows["RequestedPhase"] != ""]
@@ -348,14 +380,22 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
     if len(cc):
         a.append("Confirm the department code changes in Primavera before the next cycle: "
                  + _and(f"{r.DeptCode} {r.CodeCorrection.split(' (')[0]}" for r in cc.itertuples()) + ".")
+    dept_areas = {"Source workbook", "Duplicate project row", "Project code", "Phase transfer", "Possible copy-paste",
+                  "Possible transfer"}
+    dept_issues = [i for i in issues if i["Area"] in dept_areas]
+    fixable = [i for i in dept_issues if re.search(r"code conflict|Uncoded|code corrected|Phase heading|Row-total|different phase",
+                                                    i["Issue"], re.I)]
+    copilot = [i for i in issues if i["Area"] in ("Copilot model", "Double counting")]
     a.append("Fix the template: replace =LEFT(B,7) with the full code, lock phase headings, forbid row totals inside month columns and "
-             "give departments a 'Reason' column. These address most of the department-file data-quality issues; most issues overall "
-             "came from how the Copilot model was built (total rows, a non-month column, duplicate blocks).")
-    hot = ds[ds["Firm_Overload_Months_Final"] >= max(1, months // 3)].sort_values("Firm_Overload_Months_Final", ascending=False).head(6)
+             f"give departments a 'Reason' column. These remove the causes of {len(fixable)} of the {len(dept_issues)} issues logged "
+             f"from department files (code conflicts, uncoded rows, renumbered or missing phase headings, a typed row total); "
+             f"{len(copilot)} of the {len(issues)} logged issues came from how the Copilot model was built.")
+    hot = ds[ds["Firm_Overload_Months_Final"] >= max(1, months // 3)].sort_values("Firm_Overload_Months_Final", ascending=False)
     a.append("Review hiring or redistribution for departments whose firm workload stays above capacity for several months"
              + (": " + _and(f"{r.DeptCode} ({int(r.Firm_Overload_Months_Final)}" + (f" of {months} months)" if k == 0 else ")")
                             for k, r in enumerate(hot.itertuples())) if len(hot) else "") + ".")
-    return f, a
+    tidy = lambda xs: [re.sub(r" {2,}", " ", x) for x in xs]
+    return tidy(f), tidy(a)
 
 
 def main():
@@ -458,8 +498,21 @@ def main():
     write_workbook(out / f"ENPPI_Workload_Comments_Analysis_{tag}.xlsx", rows=rows, cells=cells, transfers=transfers,
                    ds=ds, ps=ps, mdf=mdf, cap=cap, chk=chk, inventory=inv, issues=issues, findings=findings,
                    actions=actions, meta=meta, possible=possible, sections=sections)
+    # Power BI carries every double-count candidate: code/title pairs plus same-code phase transfers (section B)
+    phase_pairs = []
+    for t in transfers.itertuples():
+        sub = rows[(rows["DeptCode"] == t.DeptCode) & (rows["ProjectBase"] == t.ProjectBase) & (rows["Net_Change"].abs() >= 1)]
+        dn, up = sub[sub["Net_Change"] < 0], sub[sub["Net_Change"] > 0]
+        if len(dn) and len(up):
+            dn, up = dn.iloc[0], up.iloc[0]
+            phase_pairs.append({"Dept": int(t.DeptCode), "Reduced Project": dn.ProjectFull, "Reduced Phase": dn.Phase,
+                                "Reduced Title": dn.D_Name, "Reduction MH": dn.Net_Change, "Added Project": up.ProjectFull,
+                                "Added Phase": up.Phase, "Added Title": up.D_Name, "Added MH": up.Net_Change,
+                                "Match Basis": f"same code {t.ProjectBase}, phase transfer", "Possible Offset MH": t.Transfer_MH,
+                                "Net of the Pair MH": dn.Net_Change + up.Net_Change})
+    all_pairs = pd.concat([possible, pd.DataFrame(phase_pairs)], ignore_index=True) if phase_pairs else possible
     export_powerbi(out / "powerbi", df=df, cells=cells, rows=rows, ps=ps, cap=cap, issues=issues, cycle=a.cycle,
-                   possible=possible, fb=fb, inventory=inv)
+                   possible=all_pairs, fb=fb, inventory=inv)
     pd.DataFrame(issues).to_csv(out / "issues_log.csv", index=False)
     print("\n".join(findings))
     print("\nACTIONS\n" + "\n".join(actions))

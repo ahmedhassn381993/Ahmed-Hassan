@@ -186,7 +186,7 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections=None):
            "'Monthly Data' and 'Capacity'.")
     heads = ["Dept", "Department", "Feedback status", "Planning Input MH", "Discipline-adjusted MH",
              "After Implementation MH", "Gross Increase", "Gross Reduction", "Net Deviation", "Deviation %",
-             "|Net|", "Rank |Net|", "Concern Items", "Concern Projects", "Changed Cells", "New Projects",
+             "|Net|", "Rank |Net|", "Concern Items", "Concern Projects", "Changed Cells", "New Allocations",
              "Phase Transfers / Moves", "Schedule Extensions", "Blank/zero not applied MH", "Requested Change MH",
              "Implemented of Request MH", "Implementation Rate", "Planner Change w/o Comment MH",
              "Effective Heads", "Capacity MH / Month", "Avg Utilisation - Planning", "Avg Utilisation - Discipline",
@@ -220,7 +220,7 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections=None):
         ws.cell(i, 13, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Concern")},"Yes")')
         ws.cell(i, 14, int(rec.Concern_Projects))
         ws.cell(i, 15, f"=SUMIFS({rng('Changed_Cells')},{rng('DeptCode')},{crit})")
-        ws.cell(i, 16, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Primary_Type")},"New Project*")')
+        ws.cell(i, 16, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Primary_Type")},"New *")')
         ws.cell(i, 17, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Concern_Types")},"*Phase Transfer*")'
                        f'+COUNTIFS({rng("DeptCode")},{crit},{rng("Concern_Types")},"*Phase Label*")')
         ws.cell(i, 18, f'=COUNTIFS({rng("DeptCode")},{crit},{rng("Concern_Types")},"*Schedule Extension*")')
@@ -897,7 +897,7 @@ def _exec_summary(wb, dr_total, pr_first, pr_last, findings, actions, meta, rr_l
             ("Net deviation requested", f"={D}I{t}", MH), ("Net deviation %", f"={D}J{t}", PCT),
             ("Gross increase requested", f"={D}G{t}", MH), ("Gross reduction requested", f"={D}H{t}", MH),
             ("After Implementation MH", f"={D}F{t}", MH), ("Implementation rate of requests", f"={D}V{t}", PCT),
-            ("Concern items", f"={D}M{t}", "#,##0"), ("New project rows", f"={D}P{t}", "#,##0"),
+            ("Concern items", f"={D}M{t}", "#,##0"), ("New allocations (projects + phases)", f"={D}P{t}", "#,##0"),
             ("Planner change without comment MH", f"={D}W{t}", MH), ("Blank/zero not applied MH", f"={D}S{t}", MH)]
     ws.cell(4, 1, "Headline figures (24-month window)").font = Font(name=FONT, bold=True, size=11, color=NAVY)
     for k, (lab, f, fmt) in enumerate(kpis):

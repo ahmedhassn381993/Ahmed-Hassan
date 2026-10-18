@@ -410,7 +410,7 @@ def build_report(logo: str | None) -> Report:
                                                                        M("Implemented MH"), M("Capacity MH")]},
           title="Company workload by month - three scenarios vs capacity (MH)")
     R.add("clusteredColumnChart", 5, 475, 760, 240, {"Y": [M("New Work MH"), M("Increase Within Schedule MH"),
-                                                           M("Schedule Extension MH"), M("Reduction Within Schedule MH"),
+                                                           M("Extension or Earlier Start MH"), M("Reduction Within Schedule MH"),
                                                            M("Removed Allocation MH")]},
           title="Net deviation bridge (MH): new work, increase, extension, reduction, removed")
     R.add("clusteredBarChart", 770, 140, 505, 575, {"Category": [dept], "Y": [M("Disc vs Plan MH")]},
