@@ -76,14 +76,16 @@ public static class DemoSeed
         await db.SaveChangesAsync();
 
         var rnd = new Random(42);
-        var depts = new[] { "1100", "2200", "2300", "2430", "2500", "2710", "3400", "5100" };
+        var depts = DepartmentList.Select(d => d.Code).ToArray();
+        var heads = await db.Departments.ToDictionaryAsync(d => d.Code, d => Math.Ceiling(d.Permanent * 0.9) + d.Temporary);
         var lines = new List<ForecastLine>();
         foreach (var p in projects)
         {
-            int start = rnd.Next(0, 8), length = rnd.Next(6, 18);
-            foreach (var d in depts.Where(_ => rnd.NextDouble() < 0.7))
+            int start = rnd.Next(0, 8), length = rnd.Next(10, 22);
+            foreach (var d in depts.Where(_ => rnd.NextDouble() < 0.6))
             {
-                double peak = rnd.Next(4, 40) * 25;
+                // sized to the department so the demo shows realistic utilisation (some departments above capacity)
+                double peak = Math.Max(50, Math.Round(heads[d] * 150 * (0.15 + rnd.NextDouble() * 0.45) / 25) * 25);
                 var line = new ForecastLine
                 {
                     CycleId = cycle.Id, DeptCode = d, SectionCode = d, Category = p.Cat, ProjectCode = p.Code,
