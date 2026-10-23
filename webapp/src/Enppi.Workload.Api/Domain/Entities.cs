@@ -14,7 +14,7 @@ public enum ProposalStatus { Draft, Submitted, Approved, PartiallyApproved, Retu
 
 public enum DeptReviewStatus { NotStarted, InProgress, Submitted, NoChangeConfirmed, Returned }
 
-public enum LineOrigin { Planner, Import, DepartmentRequest }
+public enum LineOrigin { Planner, Import, DepartmentRequest, AfterExtract }
 
 public static class Roles
 {
@@ -102,11 +102,16 @@ public class ForecastCycle
     [MaxLength(120)] public string CreatedBy { get; set; } = "";
     public DateTime? LockedAt { get; set; }
     [MaxLength(120)] public string? LockedBy { get; set; }
+    /// <summary>Headcount and settings frozen when the cycle is locked (JSON), so later Admin changes do not rewrite a
+    /// locked cycle's capacity and utilisation.</summary>
+    public string? LockedCapacity { get; set; }
 
     public DateOnly Month(int index) => FirstMonth.AddMonths(index);
 }
 
-/// <summary>One department / sub-department / category / project row of the forecast (the Excel row of today).</summary>
+/// <summary>One department / sub-department / category / project row of the forecast (the Excel row of today).
+/// <see cref="Category"/> is the planner's (baseline) category; an approved category change sets
+/// <see cref="ApprovedCategory"/> and the after extract may file the row under <see cref="AfterCategory"/>.</summary>
 public class ForecastLine
 {
     public int Id { get; set; }
@@ -114,6 +119,8 @@ public class ForecastLine
     [MaxLength(8)] public string DeptCode { get; set; } = "";
     [MaxLength(8)] public string SectionCode { get; set; } = "";
     public Category Category { get; set; }
+    public Category? ApprovedCategory { get; set; }
+    public Category? AfterCategory { get; set; }
     [MaxLength(20)] public string ProjectCode { get; set; } = "";
     [MaxLength(250)] public string Activity { get; set; } = "";
     [MaxLength(120)] public string? PlannerUpn { get; set; }

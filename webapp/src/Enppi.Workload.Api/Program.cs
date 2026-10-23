@@ -23,6 +23,9 @@ builder.Services.AddDbContext<WorkloadDbContext>(o =>
 
 // ------------------------------------------------------------------ sign-in: Entra ID through App Service Authentication
 var authMode = config["Auth:Mode"] ?? AuthModes.EasyAuth;
+// pick-a-user sign-in is for a developer's PC and the automated tests only
+if (authMode == AuthModes.Development && !builder.Environment.IsDevelopment() && !builder.Environment.IsEnvironment("Testing"))
+    throw new InvalidOperationException("Auth:Mode Development is allowed only when ASPNETCORE_ENVIRONMENT is Development.");
 // The Entra principal header is only trustworthy when App Service Authentication is switched on (the platform then strips
 // any incoming X-MS-* header). Refuse to start otherwise, unless a trusted reverse proxy is declared explicitly.
 if (authMode == AuthModes.EasyAuth && !builder.Environment.IsEnvironment("Testing") &&
@@ -48,7 +51,8 @@ builder.Services.AddSingleton<INotificationSender, SmtpNotificationSender>();
 builder.Services.AddHostedService<ReminderService>();
 builder.Services.ConfigureHttpJsonOptions(o =>
 {
-    o.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    // enums travel as names only: an integer such as kind 3 or category 9 is refused, not stored
+    o.SerializerOptions.Converters.Add(new JsonStringEnumConverter(allowIntegerValues: false));
     o.SerializerOptions.NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals;
 });
 builder.Services.AddEndpointsApiExplorer();
@@ -95,6 +99,32 @@ if (app.Environment.IsDevelopment() || config.GetValue("Swagger:Enabled", false)
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+// browser hardening: no framing (click-jacking), no MIME sniffing, scripts only from this site
+app.Use(async (ctx, next) =>
+{
+    var h = ctx.Response.Headers;
+    h["X-Frame-Options"] = "DENY";
+    h["X-Content-Type-Options"] = "nosniff";
+    h["Referrer-Policy"] = "same-origin";
+    if (!ctx.Request.Path.StartsWithSegments("/swagger"))
+        h["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
+                                       "font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+    await next();
+});
+if (!app.Environment.IsDevelopment()) app.UseHsts();
+// cross-site request forgery: every state-changing API call must carry the X-Requested-With header that the screens
+// send; a browser adds a custom header to a cross-site request only after a CORS pre-flight, which this API never allows
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api") && !HttpMethods.IsGet(ctx.Request.Method) && !HttpMethods.IsHead(ctx.Request.Method) &&
+        !HttpMethods.IsOptions(ctx.Request.Method) && string.IsNullOrEmpty(ctx.Request.Headers["X-Requested-With"]))
+    {
+        ctx.Response.StatusCode = 400;
+        await ctx.Response.WriteAsJsonAsync(new { error = "Missing X-Requested-With header." });
+        return;
+    }
+    await next();
+});
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseAuthentication();
@@ -103,6 +133,7 @@ app.UseAuthorization();
 app.MapHealthChecks("/health").AllowAnonymous();
 if (authMode == AuthModes.Development) app.MapDevelopmentLogin();
 app.MapWorkloadApi();
+app.MapFallback("/api/{**path}", () => Results.NotFound(new { error = "No such API endpoint." }));
 app.MapFallbackToFile("index.html");
 
 app.Run();

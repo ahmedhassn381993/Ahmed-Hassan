@@ -44,7 +44,7 @@ public static class Rules
     /// <summary>Classify a requested change the way the engine does (increase, reduction, redistribution, extension,
     /// earlier start, acceleration, later start, removal, new allocation, phase transfer).</summary>
     public static ChangeSummary Classify(IReadOnlyList<double> planner, IReadOnlyList<double?> proposed,
-                                         ProposalKind kind = ProposalKind.Change, bool newPhase = false)
+                                         ProposalKind kind = ProposalKind.Change, string? newType = null)
     {
         int n = planner.Count;
         var final = new double[n];
@@ -74,7 +74,7 @@ public static class Rules
         double pTotal = planner.Sum(), fTotal = final.Sum();
         if (kind == ProposalKind.NewAllocation)
         {
-            types.Add(newPhase ? "New Phase Allocation" : "New Project");
+            types.Add(newType ?? "New Project");
         }
         else if (kind == ProposalKind.CategoryChange)
         {
@@ -97,6 +97,25 @@ public static class Rules
         }
         return new ChangeSummary(types, inc, red, ext, early, changed);
     }
+
+    /// <summary>Type of a new allocation, as the engine names it: the same full code already on the department's baseline
+    /// in this sub-department and category is a reused code; another phase of a base project already in the department's
+    /// baseline is a new phase; anything else is a new project.</summary>
+    public static string NewAllocationType(bool baseInDept, bool codeReused) =>
+        codeReused ? "New Project (code reused - verify)" : baseInDept ? "New Phase Allocation" : "New Project";
+
+    /// <summary>Upper bound for one line in one month (about 6,600 people full time); larger values are typing errors.</summary>
+    public const double MaxMonthMH = 1_000_000;
+
+    /// <summary>Why a man-hour value cannot be stored, or null when it can (blank is always allowed).</summary>
+    public static string? InvalidMH(double? v) => v switch
+    {
+        null => null,
+        { } x when !double.IsFinite(x) => "Man-hours must be a number.",
+        < 0 => "Man-hours cannot be negative.",
+        > MaxMonthMH => $"Man-hours above {MaxMonthMH:N0} in one month look like a typing error.",
+        _ => null,
+    };
 
     /// <summary>The brief's eleven concern categories; engine sub-types map onto them.</summary>
     public static string BriefCategory(string type) => type switch

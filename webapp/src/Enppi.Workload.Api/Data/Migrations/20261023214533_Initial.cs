@@ -47,7 +47,8 @@ namespace Enppi.Workload.Api.Data.Migrations
                     CreatedAt = table.Column<DateTime>(type: "datetime2", nullable: false),
                     CreatedBy = table.Column<string>(type: "nvarchar(120)", maxLength: 120, nullable: false),
                     LockedAt = table.Column<DateTime>(type: "datetime2", nullable: true),
-                    LockedBy = table.Column<string>(type: "nvarchar(120)", maxLength: 120, nullable: true)
+                    LockedBy = table.Column<string>(type: "nvarchar(120)", maxLength: 120, nullable: true),
+                    LockedCapacity = table.Column<string>(type: "nvarchar(max)", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -165,6 +166,8 @@ namespace Enppi.Workload.Api.Data.Migrations
                     DeptCode = table.Column<string>(type: "nvarchar(8)", maxLength: 8, nullable: false),
                     SectionCode = table.Column<string>(type: "nvarchar(8)", maxLength: 8, nullable: false),
                     Category = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
+                    ApprovedCategory = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
+                    AfterCategory = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
                     ProjectCode = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
                     Activity = table.Column<string>(type: "nvarchar(250)", maxLength: 250, nullable: false),
                     PlannerUpn = table.Column<string>(type: "nvarchar(120)", maxLength: 120, nullable: true),

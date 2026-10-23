@@ -13,7 +13,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Audit] (
@@ -32,7 +32,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Cycles] (
@@ -49,6 +49,7 @@ BEGIN
         [CreatedBy] nvarchar(120) NOT NULL,
         [LockedAt] datetime2 NULL,
         [LockedBy] nvarchar(120) NULL,
+        [LockedCapacity] nvarchar(max) NULL,
         CONSTRAINT [PK_Cycles] PRIMARY KEY ([Id])
     );
 END;
@@ -56,7 +57,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [DepartmentReviews] (
@@ -75,7 +76,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Departments] (
@@ -94,7 +95,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Notifications] (
@@ -114,7 +115,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Projects] (
@@ -132,7 +133,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Settings] (
@@ -145,7 +146,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Users] (
@@ -162,7 +163,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Lines] (
@@ -171,6 +172,8 @@ BEGIN
         [DeptCode] nvarchar(8) NOT NULL,
         [SectionCode] nvarchar(8) NOT NULL,
         [Category] nvarchar(20) NOT NULL,
+        [ApprovedCategory] nvarchar(20) NULL,
+        [AfterCategory] nvarchar(20) NULL,
         [ProjectCode] nvarchar(20) NOT NULL,
         [Activity] nvarchar(250) NOT NULL,
         [PlannerUpn] nvarchar(120) NULL,
@@ -183,7 +186,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Proposals] (
@@ -217,7 +220,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [Values] (
@@ -234,7 +237,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE TABLE [ProposalValues] (
@@ -250,7 +253,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE INDEX [IX_Audit_CycleId_At] ON [Audit] ([CycleId], [At]);
@@ -259,7 +262,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE UNIQUE INDEX [IX_Cycles_Name] ON [Cycles] ([Name]);
@@ -268,7 +271,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE INDEX [IX_Lines_CycleId_DeptCode] ON [Lines] ([CycleId], [DeptCode]);
@@ -277,7 +280,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE INDEX [IX_Lines_CycleId_ProjectCode] ON [Lines] ([CycleId], [ProjectCode]);
@@ -286,7 +289,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE INDEX [IX_Notifications_CycleId_DeptCode] ON [Notifications] ([CycleId], [DeptCode]);
@@ -295,7 +298,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE INDEX [IX_Proposals_CycleId_DeptCode] ON [Proposals] ([CycleId], [DeptCode]);
@@ -304,7 +307,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE INDEX [IX_Proposals_CycleId_Status] ON [Proposals] ([CycleId], [Status]);
@@ -313,7 +316,7 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     CREATE INDEX [IX_Proposals_LineId] ON [Proposals] ([LineId]);
@@ -322,11 +325,11 @@ GO
 
 IF NOT EXISTS (
     SELECT * FROM [__EFMigrationsHistory]
-    WHERE [MigrationId] = N'20261018142127_Initial'
+    WHERE [MigrationId] = N'20261023214533_Initial'
 )
 BEGIN
     INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
-    VALUES (N'20261018142127_Initial', N'8.0.11');
+    VALUES (N'20261023214533_Initial', N'8.0.11');
 END;
 GO
 

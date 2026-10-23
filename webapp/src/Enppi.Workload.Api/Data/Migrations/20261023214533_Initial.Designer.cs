@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Enppi.Workload.Api.Data.Migrations
 {
     [DbContext(typeof(WorkloadDbContext))]
-    [Migration("20261018142127_Initial")]
+    [Migration("20261023214533_Initial")]
     partial class Initial
     {
         /// <inheritdoc />
@@ -189,6 +189,9 @@ namespace Enppi.Workload.Api.Data.Migrations
                         .HasMaxLength(120)
                         .HasColumnType("nvarchar(120)");
 
+                    b.Property<string>("LockedCapacity")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<int>("MonthCount")
                         .HasColumnType("int");
 
@@ -228,6 +231,14 @@ namespace Enppi.Workload.Api.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(250)
                         .HasColumnType("nvarchar(250)");
+
+                    b.Property<string>("AfterCategory")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("ApprovedCategory")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("Category")
                         .IsRequired()

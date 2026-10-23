@@ -214,7 +214,7 @@ function ReviewGrid({ data, reload }: { data: ReviewData; reload: () => void }) 
                         <td className="sticky2">
                           {ro ? <span className="small muted">{l.proposal?.reason || (l.corporateControlled ? 'Read-only' : '')}</span> : (
                             <>
-                              <input aria-label={`Reason for ${l.project}`} placeholder={lineChanged ? 'Reason (required)' : 'Reason'} value={e.reason}
+                              <input maxLength={2000} aria-label={`Reason for ${l.project}`} placeholder={lineChanged ? 'Reason (required)' : 'Reason'} value={e.reason}
                                      style={{ width: '100%', borderColor: lineChanged && !e.reason.trim() ? 'var(--discipline)' : undefined }}
                                      onChange={ev => setEdits(x => ({ ...x, [l.id]: { ...x[l.id], reason: ev.target.value, dirty: true } }))} />
                               <div className="row" style={{ gap: 2, marginTop: 2 }}>
@@ -304,7 +304,7 @@ function NewAllocation({ cycle, dept, existing, onClose, onSaved }: { cycle: Cyc
       <div className="stack">
         <p className="small muted" style={{ margin: 0 }}>Pick the project from the ENPPI project master. A code that is not in the master is recorded as a request for Corporate Planning to confirm.</p>
         <label className="field">Project code or name
-          <input value={q} onChange={e => { setQ(e.target.value); setCode(e.target.value.trim()); }} placeholder="e.g. 5248210 or WEST to EAST" />
+          <input maxLength={60} value={q} onChange={e => { setQ(e.target.value); setCode(e.target.value.trim()); }} placeholder="e.g. 5248210 or WEST to EAST" />
         </label>
         {found && found.length > 0 && q !== code + ' ' && (
           <div className="table-wrap" style={{ maxHeight: 140 }}>
@@ -314,7 +314,7 @@ function NewAllocation({ cycle, dept, existing, onClose, onSaved }: { cycle: Cyc
           </div>
         )}
         <div className="row">
-          <label className="field" style={{ flex: 1 }}>Activity / title<input value={activity} onChange={e => setActivity(e.target.value)} /></label>
+          <label className="field" style={{ flex: 1 }}>Activity / title<input maxLength={250} value={activity} onChange={e => setActivity(e.target.value)} /></label>
           <label className="field">Category
             <select value={category} onChange={e => setCategory(e.target.value as Category)}>
               {(['Running', 'UnderSignature', 'Proposal', 'Potential'] as Category[]).map(c => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
@@ -327,7 +327,7 @@ function NewAllocation({ cycle, dept, existing, onClose, onSaved }: { cycle: Cyc
               <td key={i} className="m"><input value={v} aria-label={`${monthLabel(cycle.firstMonth, i)} MH`} onChange={e => setVals(x => x.map((y, k) => (k === i ? e.target.value : y)))} /></td>
             ))}</tr></tbody></table>
         </div>
-        <label className="field">Reason (required)<textarea rows={3} value={reason} onChange={e => setReason(e.target.value)} /></label>
+        <label className="field">Reason (required)<textarea rows={3} maxLength={2000} value={reason} onChange={e => setReason(e.target.value)} /></label>
         <ErrorMsg error={err} />
         <div className="row end"><button onClick={onClose}>Cancel</button><button className="primary" onClick={save} disabled={!code}>Save draft</button></div>
       </div>
@@ -355,7 +355,7 @@ function CategoryChange({ cycle, line, onClose, onSaved }: { cycle: Cycle; line:
             {(['Running', 'UnderSignature', 'Proposal', 'Potential'] as Category[]).filter(c => c !== line.category).map(c => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
           </select>
         </label>
-        <label className="field">Reason (required)<textarea rows={3} value={reason} onChange={e => setReason(e.target.value)} /></label>
+        <label className="field">Reason (required)<textarea rows={3} maxLength={2000} value={reason} onChange={e => setReason(e.target.value)} /></label>
         <ErrorMsg error={err} />
         <div className="row end"><button onClick={onClose}>Cancel</button><button className="primary" onClick={save}>Save request</button></div>
       </div>

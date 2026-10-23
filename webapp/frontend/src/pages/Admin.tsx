@@ -55,13 +55,13 @@ function UserForm({ user, onClose, onSaved }: { user: User; onClose: () => void;
   return (
     <Modal title={user.upn ? `Edit ${user.upn}` : 'Add user'} onClose={onClose}>
       <div className="stack">
-        <label className="field">Sign-in name (UPN)<input value={u.upn} disabled={!!user.upn} onChange={e => setU({ ...u, upn: e.target.value })} /></label>
-        <label className="field">Display name<input value={u.displayName} onChange={e => setU({ ...u, displayName: e.target.value })} /></label>
+        <label className="field">Sign-in name (UPN)<input maxLength={120} value={u.upn} disabled={!!user.upn} onChange={e => setU({ ...u, upn: e.target.value })} /></label>
+        <label className="field">Display name<input maxLength={120} value={u.displayName} onChange={e => setU({ ...u, displayName: e.target.value })} /></label>
         <div className="row">
           <label className="field">Role<select value={u.role} onChange={e => setU({ ...u, role: e.target.value })}>{ROLES.map(r => <option key={r}>{r}</option>)}</select></label>
-          <label className="field" style={{ flex: 1 }}>Departments (comma-separated, e.g. 2410,2420)<input value={u.deptCodes ?? ''} onChange={e => setU({ ...u, deptCodes: e.target.value })} /></label>
+          <label className="field" style={{ flex: 1 }}>Departments (comma-separated, e.g. 2410,2420)<input maxLength={200} value={u.deptCodes ?? ''} onChange={e => setU({ ...u, deptCodes: e.target.value })} /></label>
         </div>
-        <label className="field">Email for reminders<input value={u.email ?? ''} onChange={e => setU({ ...u, email: e.target.value })} /></label>
+        <label className="field">Email for reminders<input maxLength={200} value={u.email ?? ''} onChange={e => setU({ ...u, email: e.target.value })} /></label>
         <label className="row small"><input type="checkbox" checked={u.isActive} onChange={e => setU({ ...u, isActive: e.target.checked })} /> Active</label>
         <ErrorMsg error={err} />
         <div className="row end"><button onClick={onClose}>Cancel</button><button className="primary" onClick={save} disabled={!u.upn}>Save</button></div>

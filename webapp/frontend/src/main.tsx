@@ -31,6 +31,14 @@ function Shell() {
     if (me.authMode === 'Development') { await api.post('/api/dev/logout'); window.location.href = '/login'; }
     else window.location.href = '/.auth/logout';
   };
+  if (me.roles.length === 0) return (
+    <div className="login card">
+      <h1>ENPPI Workload Forecast</h1>
+      <p className="lead">You are signed in as <strong>{me.upn}</strong>, but this account has no access to the workload forecast yet.</p>
+      <p>Ask Corporate Planning or the system administrator to add you (Administration → Users) with your role and departments.</p>
+      <button onClick={signOut}>Sign out</button>
+    </div>
+  );
   return (
     <div className="shell">
       <aside className="sidebar">

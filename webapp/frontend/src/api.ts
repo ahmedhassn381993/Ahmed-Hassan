@@ -5,7 +5,8 @@ export class ApiError extends Error {
 }
 
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method, credentials: 'same-origin', headers: {} };
+  // X-Requested-With marks the call as coming from these screens; the API refuses state changes without it (CSRF)
+  const init: RequestInit = { method, credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } };
   if (body instanceof FormData) init.body = body;
   else if (body !== undefined) {
     init.body = JSON.stringify(body);

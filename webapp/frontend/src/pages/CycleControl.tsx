@@ -221,7 +221,7 @@ function NewCycle({ onClose, onDone }: { onClose: () => void; onDone: () => void
   return (
     <Modal title="New forecast cycle" onClose={onClose}>
       <div className="stack">
-        <label className="field">Name<input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Q1 2027" /></label>
+        <label className="field">Name<input maxLength={40} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Q1 2027" /></label>
         <div className="row">
           <label className="field">First month<input type="month" value={first} onChange={e => setFirst(e.target.value)} /></label>
           <label className="field">Months<input type="number" min={1} max={60} value={months} onChange={e => setMonths(Number(e.target.value))} /></label>

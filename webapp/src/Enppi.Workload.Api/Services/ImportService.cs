@@ -10,8 +10,12 @@ namespace Enppi.Workload.Api.Services;
 
 public record ImportResult(int Created, int Updated, int Skipped, List<string> Warnings);
 
-/// <summary>A sheet read as header names + rows of raw cell values (string, double or DateTime).</summary>
-public record SheetData(List<string> Headers, List<object?[]> Rows);
+/// <summary>A sheet read as header names + rows of raw cell values (string, double or DateTime). <see cref="Others"/>
+/// holds the workbook's other sheets by name (empty for CSV).</summary>
+public record SheetData(List<string> Headers, List<object?[]> Rows)
+{
+    public Dictionary<string, SheetData> Others { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+}
 
 /// <summary>Imports the standard templates. Planning, proposals and after-implementation use one wide layout:
 /// Dept | SubDept | Category | ProjectCode | Activity | Planner | Reason | one column per month (date or "Jul-26").
@@ -23,9 +27,22 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
     public static SheetData Read(Stream stream, string fileName)
     {
         if (fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)) return ReadCsv(stream);
-        using var wb = new XLWorkbook(stream);
-        var ws = wb.Worksheets.First();
-        var used = ws.RangeUsed() ?? throw new RuleException("The sheet is empty.");
+        XLWorkbook wb;
+        try { wb = new XLWorkbook(stream); }
+        catch (Exception e) when (e is not RuleException) { throw new RuleException("The file is not a readable Excel workbook (.xlsx) or CSV."); }
+        using (wb)
+        {
+            var first = ReadSheet(wb.Worksheets.First()) ?? throw new RuleException("The sheet is empty.");
+            foreach (var ws in wb.Worksheets.Skip(1))
+                if (ReadSheet(ws) is { } other) first.Others[ws.Name] = other;
+            return first;
+        }
+    }
+
+    private static SheetData? ReadSheet(IXLWorksheet ws)
+    {
+        var used = ws.RangeUsed();
+        if (used is null) return null;
         int firstRow = used.FirstRow().RowNumber(), lastRow = used.LastRow().RowNumber(), lastCol = used.LastColumn().ColumnNumber();
         var headers = Enumerable.Range(1, lastCol).Select(c => CellText(ws.Cell(firstRow, c))).ToList();
         var rows = new List<object?[]>();
@@ -109,14 +126,19 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         _ => v.ToString()!.Trim(),
     };
 
-    private static double? N(object? v) => v switch
+    private static double? N(object? v)
     {
-        null => null,
-        double d => d,
-        string s when s.Length == 0 => null,
-        string s when double.TryParse(s.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) => d,
-        _ => throw new RuleException($"'{v}' is not a number"),
-    };
+        double? d = v switch
+        {
+            null => null,
+            double x => x,
+            string s when s.Length == 0 => null,
+            string s when double.TryParse(s.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out var x) => x,
+            _ => throw new RuleException($"'{v}' is not a number"),
+        };
+        if (Rules.InvalidMH(d) is { } why) throw new RuleException($"'{v}': {why}");
+        return d;
+    }
 
     /// <summary>Occurrence: which of several rows with the same department / sub-department / category / code this is
     /// (1, 2...). Optional; without it rows are numbered in file order, which is only safe for complete files.</summary>
@@ -186,14 +208,23 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         return c;
     }
 
-    private async Task EnsureProjectsAsync(IEnumerable<ForecastRow> rows, List<string> warnings)
+    private async Task EnsureProjectsAsync(IEnumerable<ForecastRow> rows, List<string> warnings, bool requestsOnly = false)
     {
-        var known = (await db.Projects.Select(p => p.Code).ToListAsync()).ToHashSet();
-        foreach (var r in rows.Where(r => !known.Contains(r.Code)).GroupBy(r => r.Code))
+        var all = await db.Projects.AsNoTracking().ToDictionaryAsync(p => p.Code);
+        foreach (var r in rows.Where(r => !all.ContainsKey(r.Code)).GroupBy(r => r.Code))
         {
-            db.Projects.Add(new Project { Code = r.Key, BaseCode = Rules.BaseCode(r.Key), Name = r.First().Activity, InMaster = false });
-            known.Add(r.Key);
-            warnings.Add($"Project {r.Key} is not in the project master; added as an unconfirmed code.");
+            // a phase of a master project (5248200-1 of 5248200) is in the master, as in the comments analysis
+            var master = all.GetValueOrDefault(Rules.BaseCode(r.Key)) is { InMaster: true } m && m.Code != r.Key ? m : null;
+            if (requestsOnly)
+            {
+                // new allocations: the project row is created when Corporate Planning approves the request
+                if (master is null) warnings.Add($"Project {r.Key} is not in the project master; it is recorded on the request until approved.");
+                continue;
+            }
+            var p = ProjectCatalog.FromBase(r.Key, r.First().Activity, master);
+            db.Projects.Add(p);
+            all[r.Key] = p;
+            if (!p.InMaster) warnings.Add($"Project {r.Key} is not in the project master; added as an unconfirmed code.");
         }
         var depts = (await db.Departments.Select(d => d.Code).ToListAsync()).ToHashSet();
         foreach (var d in rows.Select(r => r.Dept).Distinct().Where(d => !depts.Contains(d)))
@@ -221,7 +252,11 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
                 db.Lines.Add(line);
                 created++;
             }
-            else updated++;
+            else
+            {
+                updated++;
+                if (line.Origin == LineOrigin.AfterExtract) line.Origin = LineOrigin.Import;
+            }
             if (r.Planner.Length > 0) line.PlannerUpn = r.Planner.ToLowerInvariant();
             if (r.Activity.Length > 0) line.Activity = r.Activity;
             foreach (var (m, val) in r.Months)
@@ -246,21 +281,49 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         await EnsureProjectsAsync(rows, warnings);
         var lines = await db.Lines.Include(l => l.Values).Where(l => l.CycleId == cycleId).ToListAsync();
         foreach (var v in lines.SelectMany(l => l.Values)) v.AfterMH = null;
+        foreach (var l in lines) l.AfterCategory = null;
+        var proposals = await db.Proposals.Where(p => p.CycleId == cycleId && p.Status != ProposalStatus.Draft).ToListAsync();
         var index = LineIndex(lines);
         var occ = new Dictionary<string, int>();
-        int created = 0, updated = 0;
+        var matched = new HashSet<ForecastLine>();
+        int created = 0, updated = 0, moved = 0, requested = 0;
         foreach (var r in rows)
         {
             var baseKey = $"{r.Dept}|{r.Section}|{r.Category}|{r.Code}";
             occ[baseKey] = r.Occurrence ?? occ.GetValueOrDefault(baseKey) + 1;
-            if (!index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line))
+            if (!index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line) || matched.Contains(line))
+            {
+                line = null;
+                // the planner filed the row under the category the department asked for (approved or still pending)
+                var movedTo = proposals.Where(p => p.Kind == ProposalKind.CategoryChange && p.RequestedCategory == r.Category &&
+                                                   p.Status != ProposalStatus.Rejected).Select(p => p.LineId).ToHashSet();
+                line = lines.FirstOrDefault(l => !matched.Contains(l) && l.DeptCode == r.Dept && l.SectionCode == r.Section && l.ProjectCode == r.Code &&
+                                                 l.Category != r.Category && (l.ApprovedCategory == r.Category || movedTo.Contains(l.Id)));
+                if (line is not null) { line.AfterCategory = r.Category; moved++; }
+            }
+            if (line is null &&
+                proposals.FirstOrDefault(p => p.Kind == ProposalKind.NewAllocation && p.LineId == null && p.Line == null && p.DeptCode == r.Dept &&
+                                              (p.NewSectionCode ?? p.DeptCode) == r.Section && (p.NewCategory ?? Category.Proposal) == r.Category &&
+                                              p.NewProjectCode == r.Code) is { } request)
+            {
+                // a new allocation the planner already carried into Primavera: the request and the after values share one line
+                line = new ForecastLine { CycleId = cycleId, DeptCode = r.Dept, SectionCode = r.Section, Category = r.Category,
+                                          ProjectCode = r.Code, Activity = request.NewActivity ?? r.Activity, Origin = LineOrigin.DepartmentRequest };
+                db.Lines.Add(line);
+                lines.Add(line);
+                request.Line = line;
+                requested++;
+            }
+            if (line is null)
             {
                 line = new ForecastLine { CycleId = cycleId, DeptCode = r.Dept, SectionCode = r.Section, Category = r.Category,
-                                          ProjectCode = r.Code, Activity = r.Activity, Origin = LineOrigin.Import };
+                                          ProjectCode = r.Code, Activity = r.Activity, Origin = LineOrigin.AfterExtract };
                 db.Lines.Add(line);
+                lines.Add(line);
                 created++;
             }
             else updated++;
+            matched.Add(line);
             foreach (var (m, val) in r.Months)
             {
                 var v = line.Values.FirstOrDefault(x => x.MonthIndex == m);
@@ -270,32 +333,46 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
         }
         c.HasAfterData = true;
         if (created > 0) warnings.Add($"{created} rows exist only in the after extract (added by Planning without a comment).");
+        if (moved > 0) warnings.Add($"{moved} rows are filed under the category their department asked for; matched to the original line.");
+        if (requested > 0) warnings.Add($"{requested} rows carry new allocations that are still requests; matched to those requests.");
         db.Log(user.Upn, "ImportAfter", "Cycle", cycleId.ToString(), cycleId, $"{updated} matched, {created} after-only");
         await db.SaveChangesAsync();
         return new ImportResult(created, updated, 0, warnings);
     }
 
     /// <summary>Migration of department feedback files (-c workbooks): blank = no change; a row without a planning line
-    /// becomes a new-allocation request. Imported proposals are submitted on the department's behalf.</summary>
+    /// becomes a new-allocation request. Imported proposals are submitted on the department's behalf. Importing the same
+    /// file again updates the pending requests; requests Corporate Planning already decided are left as they are.
+    /// An optional sheet "Reviewed departments" (column Dept) lists every department whose feedback was processed, so
+    /// departments that answered without a man-hour change are recorded as "no change".</summary>
     public async Task<ImportResult> ImportProposalsAsync(int cycleId, SheetData sheet)
     {
         var c = await OpenCycleAsync(cycleId);
         var warnings = new List<string>();
         var rows = ParseForecast(sheet, c, warnings);
-        await EnsureProjectsAsync(rows, warnings);
         var lines = await db.Lines.Include(l => l.Values).Where(l => l.CycleId == cycleId).ToListAsync();
         var index = LineIndex(lines);
+        await EnsureProjectsAsync(rows.Where(r => !index.ContainsKey(Key(r.Dept, r.Section, r.Category, r.Code, 1))), warnings, requestsOnly: true);
         var existing = await db.Proposals.Include(p => p.Values).Where(p => p.CycleId == cycleId).ToListAsync();
+        var baseline = lines.Where(WorkloadService.InBaseline).ToList();
         var occ = new Dictionary<string, int>();
-        int created = 0, updated = 0, skipped = 0;
+        var newOcc = new Dictionary<string, int>();
+        int created = 0, updated = 0, skipped = 0, decided = 0;
         var depts = new HashSet<string>();
+        bool Decided(Proposal p) => p.Status is ProposalStatus.Approved or ProposalStatus.PartiallyApproved or ProposalStatus.Rejected;
+        void Submit(Proposal p, string reason)
+        {
+            p.Reason = reason;
+            p.Status = ProposalStatus.Submitted;
+            p.SubmittedAt = DateTime.UtcNow;
+        }
         foreach (var r in rows)
         {
             depts.Add(r.Dept);
             var baseKey = $"{r.Dept}|{r.Section}|{r.Category}|{r.Code}";
             occ[baseKey] = r.Occurrence ?? occ.GetValueOrDefault(baseKey) + 1;
-            var reason = r.Reason.Length > 0 ? r.Reason : "Imported from the department's feedback workbook";
-            if (index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line))
+            var reason = WorkflowService.Text(r.Reason.Length > 0 ? r.Reason : "Imported from the department's feedback workbook", 2000, $"Row {r.RowNumber}: the reason");
+            if (index.TryGetValue(Key(r.Dept, r.Section, r.Category, r.Code, occ[baseKey]), out var line) && WorkloadService.InBaseline(line))
             {
                 var planner = Enumerable.Range(0, c.MonthCount)
                     .Select(m => line.Values.FirstOrDefault(v => v.MonthIndex == m)?.PlannerMH ?? 0).ToArray();
@@ -305,50 +382,77 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
                 {
                     // the department filed the project under another category: a category-change request
                     var cr = existing.FirstOrDefault(x => x.LineId == line.Id && x.Kind == ProposalKind.CategoryChange);
-                    if (cr is null) { cr = new Proposal { CycleId = cycleId, LineId = line.Id, DeptCode = r.Dept, Kind = ProposalKind.CategoryChange, CreatedBy = user.Upn }; db.Proposals.Add(cr); created++; }
-                    cr.RequestedCategory = rc;
-                    cr.Reason = reason;
-                    cr.ChangeTypes = "Phase Transfer";
-                    cr.Status = ProposalStatus.Submitted;
-                    cr.SubmittedAt = DateTime.UtcNow;
+                    if (cr is not null && Decided(cr)) decided++;
+                    else
+                    {
+                        if (cr is null) { cr = new Proposal { CycleId = cycleId, LineId = line.Id, DeptCode = r.Dept, Kind = ProposalKind.CategoryChange, CreatedBy = user.Upn }; db.Proposals.Add(cr); existing.Add(cr); created++; }
+                        cr.RequestedCategory = rc;
+                        cr.ChangeTypes = "Phase Transfer";
+                        Submit(cr, reason);
+                    }
                 }
                 if (change.MonthsChanged.Count == 0) { if (r.RequestedCategory is null) skipped++; continue; }
                 var p = existing.FirstOrDefault(x => x.LineId == line.Id && x.Kind == ProposalKind.Change);
-                if (p is null) { p = new Proposal { CycleId = cycleId, LineId = line.Id, DeptCode = r.Dept, Kind = ProposalKind.Change, CreatedBy = user.Upn }; db.Proposals.Add(p); created++; }
+                if (p is not null && Decided(p)) { decided++; continue; }
+                if (p is null) { p = new Proposal { CycleId = cycleId, LineId = line.Id, DeptCode = r.Dept, Kind = ProposalKind.Change, CreatedBy = user.Upn }; db.Proposals.Add(p); existing.Add(p); created++; }
                 else updated++;
                 p.Values.Clear();
                 foreach (var (m, val) in r.Months.Where(kv => kv.Value != null))
                     p.Values.Add(new ProposalValue { MonthIndex = m, ProposedMH = val });
-                p.Reason = reason;
                 p.ChangeTypes = change.TypesText;
-                p.Status = ProposalStatus.Submitted;
-                p.SubmittedAt = DateTime.UtcNow;
+                Submit(p, reason);
             }
             else
             {
                 if (r.Months.Values.All(v => (v ?? 0) < Rules.Tol)) { skipped++; continue; }
-                var p = new Proposal
+                // the same new allocation imported again updates its request (matched by department, sub-department,
+                // category, code and occurrence) instead of adding it twice
+                newOcc[baseKey] = r.Occurrence ?? newOcc.GetValueOrDefault(baseKey) + 1;
+                var same = existing.Where(x => x.Kind == ProposalKind.NewAllocation && x.DeptCode == r.Dept &&
+                                               (x.NewSectionCode ?? x.DeptCode) == r.Section && x.NewCategory == r.Category && x.NewProjectCode == r.Code)
+                    .OrderBy(x => x.Id).ToList();
+                var p = same.Count >= newOcc[baseKey] ? same[newOcc[baseKey] - 1] : null;
+                if (p is not null && Decided(p)) { decided++; continue; }
+                if (p is null)
                 {
-                    CycleId = cycleId, DeptCode = r.Dept, Kind = ProposalKind.NewAllocation, NewProjectCode = r.Code,
-                    NewActivity = r.Activity, NewCategory = r.Category, NewSectionCode = r.Section, Reason = reason,
-                    Status = ProposalStatus.Submitted, SubmittedAt = DateTime.UtcNow, CreatedBy = user.Upn, ChangeTypes = "New Project",
-                };
+                    p = new Proposal { CycleId = cycleId, DeptCode = r.Dept, Kind = ProposalKind.NewAllocation, NewProjectCode = r.Code,
+                                       NewCategory = r.Category, NewSectionCode = r.Section, CreatedBy = user.Upn };
+                    db.Proposals.Add(p);
+                    existing.Add(p);
+                    created++;
+                }
+                else updated++;
+                p.NewActivity = WorkflowService.Text(r.Activity, 250, $"Row {r.RowNumber}: the activity");
+                p.Values.Clear();
                 foreach (var (m, val) in r.Months.Where(kv => kv.Value != null)) p.Values.Add(new ProposalValue { MonthIndex = m, ProposedMH = val });
-                db.Proposals.Add(p);
-                created++;
+                p.ChangeTypes = Rules.NewAllocationType(baseline.Any(l => l.DeptCode == r.Dept && Rules.BaseCode(l.ProjectCode) == Rules.BaseCode(r.Code)),
+                                                        baseline.Any(l => l.DeptCode == r.Dept && l.SectionCode == r.Section && l.Category == r.Category && l.ProjectCode == r.Code));
+                Submit(p, reason);
             }
         }
-        foreach (var d in depts)
+        if (decided > 0) warnings.Add($"{decided} rows belong to requests Corporate Planning already decided; they were left unchanged (return them to change).");
+        // departments that answered without a man-hour change
+        var reviewed = new HashSet<string>(depts);
+        if (sheet.Others.TryGetValue("Reviewed departments", out var list))
+        {
+            int col = list.Headers.FindIndex(h => string.Equals(h.Trim(), "Dept", StringComparison.OrdinalIgnoreCase));
+            if (col < 0) warnings.Add("Sheet 'Reviewed departments' has no Dept column - ignored.");
+            else foreach (var row in list.Rows) if (S(col < row.Length ? row[col] : null) is { Length: > 0 } d) reviewed.Add(d);
+        }
+        foreach (var d in reviewed)
         {
             var rev = await db.DepartmentReviews.FirstOrDefaultAsync(x => x.CycleId == cycleId && x.DeptCode == d)
                       ?? db.DepartmentReviews.Add(new DepartmentReview { CycleId = cycleId, DeptCode = d }).Entity;
-            rev.Status = DeptReviewStatus.Submitted;
+            bool any = depts.Contains(d) || existing.Any(p => p.DeptCode == d && p.Status != ProposalStatus.Draft);
+            if (!any && rev.Status == DeptReviewStatus.Submitted) continue;
+            rev.Status = any ? DeptReviewStatus.Submitted : DeptReviewStatus.NoChangeConfirmed;
             rev.SubmittedAt = DateTime.UtcNow;
             rev.SubmittedBy = user.Upn + " (import)";
         }
-        db.Log(user.Upn, "ImportProposals", "Cycle", cycleId.ToString(), cycleId, $"{created} created, {updated} updated, {skipped} unchanged rows");
+        db.Log(user.Upn, "ImportProposals", "Cycle", cycleId.ToString(), cycleId,
+               $"{created} created, {updated} updated, {skipped} unchanged rows, {decided} decided rows kept");
         await db.SaveChangesAsync();
-        return new ImportResult(created, updated, skipped, warnings);
+        return new ImportResult(created, updated, skipped + decided, warnings);
     }
 
     public async Task<ImportResult> ImportDepartmentsAsync(SheetData sheet)
@@ -366,12 +470,14 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
             if (c.Length == 0) continue;
             var d = await db.Departments.FindAsync(c);
             if (d is null) { db.Departments.Add(d = new Department { Code = c }); created++; } else updated++;
-            d.Name = S(At(name));
-            d.ParentCode = S(At(parent)) is { Length: > 0 } p ? p : null;
-            d.Permanent = (int)(N(At(perm)) ?? d.Permanent);
-            d.Temporary = (int)(N(At(temp)) ?? d.Temporary);
-            d.Managers = (int)(N(At(mgr)) ?? d.Managers);
-            d.LoanToUnpaid = (int)(N(At(loan)) ?? d.LoanToUnpaid);
+            if (c.Length > 8) throw new RuleException($"Department code '{c}' is longer than 8 characters.");
+            d.Name = WorkflowService.Text(S(At(name)), 120, $"Department {c}: the name");
+            if (parent >= 0) d.ParentCode = S(At(parent)) is { Length: > 0 } p ? WorkflowService.Text(p, 8, $"Department {c}: the parent code") : null;
+            int Heads(int col, int current) => N(At(col)) is { } x ? (x <= 100_000 ? (int)x : throw new RuleException($"Department {c}: headcount {x} is too large.")) : current;
+            d.Permanent = Heads(perm, d.Permanent);
+            d.Temporary = Heads(temp, d.Temporary);
+            d.Managers = Heads(mgr, d.Managers);
+            d.LoanToUnpaid = Heads(loan, d.LoanToUnpaid);
         }
         db.Log(user.Upn, "ImportDepartments", "Department", "*", null, $"{created} created, {updated} updated");
         await db.SaveChangesAsync();
@@ -392,13 +498,17 @@ public class ImportService(WorkloadDbContext db, CurrentUser user)
             object? At(int i) => i >= 0 && i < r.Length ? r[i] : null;
             var c = S(At(code));
             if (c.Length == 0) continue;
+            if (c.Length > 20) throw new RuleException($"Project code '{c}' is longer than 20 characters.");
             if (!all.TryGetValue(c, out var p)) { db.Projects.Add(p = new Project { Code = c }); all[c] = p; created++; } else updated++;
             p.BaseCode = Rules.BaseCode(c);
-            p.Name = S(At(name));
-            p.Client = S(At(client)) is { Length: > 0 } cl ? cl : p.Client;
+            p.Name = WorkflowService.Text(S(At(name)), 250, $"Project {c}: the name");
+            p.Client = S(At(client)) is { Length: > 0 } cl ? WorkflowService.Text(cl, 60, $"Project {c}: the client") : p.Client;
             p.MasterCategory = S(At(cat)) is { Length: > 0 } mc ? mc[..Math.Min(4, mc.Length)] : p.MasterCategory;
             p.InMaster = true;
         }
+        // phases of master projects added earlier as unconfirmed codes (5248200-1) now belong to the master
+        foreach (var p in all.Values.Where(p => !p.InMaster && p.BaseCode != p.Code))
+            if (all.GetValueOrDefault(p.BaseCode) is { InMaster: true } m) (p.InMaster, p.Name, p.Client) = (true, m.Name, m.Client);
         db.Log(user.Upn, "ImportProjects", "Project", "*", null, $"{created} created, {updated} updated");
         await db.SaveChangesAsync();
         return new ImportResult(created, updated, 0, new());

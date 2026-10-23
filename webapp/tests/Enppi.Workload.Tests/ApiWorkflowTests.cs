@@ -31,6 +31,7 @@ public class AppFactory : WebApplicationFactory<Program>
     {
         var c = CreateClient();
         c.DefaultRequestHeaders.Add("X-Dev-User", upn);
+        c.DefaultRequestHeaders.Add("X-Requested-With", "XMLHttpRequest");   // the screens' CSRF marker
         return c;
     }
 

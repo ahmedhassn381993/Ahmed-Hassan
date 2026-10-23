@@ -26,6 +26,8 @@ public class WorkloadDbContext(DbContextOptions<WorkloadDbContext> options) : Db
         b.Entity<ForecastLine>(e =>
         {
             e.Property(l => l.Category).HasConversion<string>().HasMaxLength(20);
+            e.Property(l => l.ApprovedCategory).HasConversion<string>().HasMaxLength(20);
+            e.Property(l => l.AfterCategory).HasConversion<string>().HasMaxLength(20);
             e.Property(l => l.Origin).HasConversion<string>().HasMaxLength(20);
             e.HasIndex(l => new { l.CycleId, l.DeptCode });
             e.HasIndex(l => new { l.CycleId, l.ProjectCode });

@@ -45,7 +45,7 @@ They were cross-checked on the Q3 2026 data. Loaded through the import files, th
 | My Projects | planners | • Planner grid, editable during planner entry; add lines<br>• Implementation list of approved changes ("mark implemented") |
 | Approval Queue | Corporate Planning | • Requests sorted by severity, with month-by-month planner / proposed / approve values<br>• Approve, approve edited values, return (comment required) or reject<br>• Bulk-approve small changes |
 | Cycle Control | Corporate Planning | • Stage stepper: Draft → Planner entry → Discipline review → Approval → Implementation → Locked<br>• Due dates<br>• Status board of the 26 departments, with return and reminders<br>• Imports with templates<br>• Reminder log and audit trail |
-| Reports | everyone in scope | • Department comparison, project severity and the deviation register<br>• Excel report<br>• Power BI data (.zip) |
+| Reports | everyone in scope (a discipline manager sees their own departments) | • Department comparison, project severity and the deviation register<br>• Excel report<br>• Power BI data (.zip) |
 | Administration | administrators / Corporate Planning | • Users and department scope<br>• Headcount (capacity)<br>• Thresholds<br>• Project and department master imports |
 
 The server enforces every rule on each call, not only the screen:
@@ -54,10 +54,17 @@ The server enforces every rule on each call, not only the screen:
 * cycle stage;
 * Loan To and Internal values are Corporate Planning controlled;
 * a reason is required, and changes above 20 % or 2,000 MH need a fuller justification;
+* a decided request changes only after Corporate Planning returns it to the department;
 * nothing can be locked while requests wait for a decision;
-* no edits after lock.
+* no edits after lock; a locked cycle keeps the headcount and settings it was locked with.
 
 Every change is written to the audit trail.
+
+**How decisions work.** Each request is decided on its own: a man-hour change and a category move on the same row are
+two queue entries. The approved values of a row are rebuilt from the requests that are approved now, so deciding again,
+returning or rejecting never leaves an earlier decision behind. Planning Input always keeps the planner's category; an
+approved category move shows in the approved and after-implementation figures. Importing the same feedback file again
+updates pending requests and leaves decided ones as they are.
 
 ## Run it locally
 
@@ -77,7 +84,7 @@ During screen development, run `npm run dev` in `frontend` (port 5173, with the 
 ## Tests
 
 ```bash
-cd webapp && dotnet test                               # 31 tests: rules + the full workflow over HTTP as each role
+cd webapp && dotnet test                               # 47 tests: rules, the full workflow over HTTP as each role, and the review findings
 cd e2e && npm ci && npx playwright test                # 6 browser tests: review → decision → implementation → reports
 ```
 
@@ -95,7 +102,8 @@ python comments_analysis/engine/run_analysis.py --cycle "Q3 2026" ... --webapp-e
 The folder then holds four files:
 
 * `planning.xlsx`
-* `proposals.xlsx` (only the months a department changed; a phase move becomes a category-change request)
+* `proposals.xlsx` (only the months a department changed; a phase move becomes a category-change request; a second sheet
+  lists every department whose feedback was processed, so "no change" answers are recorded too)
 * `after.xlsx`
 * `departments.csv`
 
@@ -108,6 +116,11 @@ Load them as follows:
 
 Each import uses one layout: Dept, SubDept, Category, ProjectCode, Activity, Planner, Reason, Occurrence,
 RequestedCategory, then one column per month. Download a blank template per cycle from the same page.
+
+Loaded this way, the application gives the engine's figures: the three scenarios by category, the bridge, severity, new
+allocations and the implementation rate. One difference is by design: the application has no code-change request, so a
+department that only re-codes a project (no man-hour change) appears in the engine's analysis but not as a request here;
+when man-hours change too, the requested code is carried in the request's reason.
 
 ## Power BI
 
@@ -137,7 +150,8 @@ Give the Power BI service identity `SELECT` on schema `reporting` only.
 1. **App registration** (Entra ID → App registrations):
    * Add the web redirect URI `https://<app>.azurewebsites.net/.auth/login/aad/callback`.
    * Under App roles, add `CorporatePlanning`, `Planner`, `DisciplineManager`, `Viewer` and `Admin`.
-   * Assign the ENPPI groups to them (Enterprise applications → Users and groups).
+   * Assign the ENPPI groups to them (Enterprise applications → Users and groups), and set **Assignment required = Yes**
+     on the enterprise application (Properties), so only assigned users can sign in.
    * Create a client secret.
 2. **Infrastructure:**
    ```bash
@@ -175,11 +189,22 @@ reminder days.
 * **Sign-in.** App Service Authentication signs users in with their ENPPI account. The API reads the platform's
   `X-MS-CLIENT-PRINCIPAL` header, which App Service strips from incoming requests. In `EasyAuth` mode the app refuses
   to start if platform authentication is off.
-* **Roles and scope.** Roles come from Entra app roles. Department scope comes from the Users table. Every endpoint
-  checks both.
+* **Roles and scope.** Roles come from Entra app roles, or from the Users table for accounts without an app role. An
+  account with neither can sign in but sees nothing ("ask for access"). Department scope comes from the Users table: a
+  discipline manager's review, lines, reports and dashboard cover their own departments; Corporate Planning, viewers,
+  administrators and planners see the whole company.
+* **Requests from the screens only.** Every call that changes data must carry the `X-Requested-With` header the screens
+  send; a page on another site cannot add it without a CORS pre-flight, which the API never grants (cross-site request
+  forgery). Scripts that call the API must send it too.
+* **Browser protections.** Responses forbid framing (`X-Frame-Options: DENY`, CSP `frame-ancestors 'none'`), MIME
+  sniffing and scripts from other sites. Text exported to CSV is prefixed with `'` when it starts with `=`, `+`, `-` or
+  `@`, so Excel never runs it as a formula.
+* **Input checks.** Enum values travel as names only; man-hours must be finite, non-negative and plausible; text is
+  limited to the database column lengths. A broken request gets a 400 with the reason, never a 500.
 * **Database credentials.** The database is reached through the managed identity; no password exists in code or
   configuration.
-* **Endpoints.** The development sign-in endpoints exist only in `Development` mode. Swagger is off in production.
+* **Endpoints.** The development sign-in endpoints exist only in `Development` mode, which refuses to start outside the
+  Development environment. Swagger is off in production. Unknown `/api` paths return 404.
 
 ## Not yet verified here
 

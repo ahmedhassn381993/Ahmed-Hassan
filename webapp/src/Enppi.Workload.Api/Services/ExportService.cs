@@ -32,10 +32,12 @@ public static class ExportService
                 DateOnly d => d.ToString("yyyy-MM-dd"),
                 DateTime t => t.ToString("yyyy-MM-dd"),
                 bool b => b ? "Yes" : "No",
-                _ => v.ToString() ?? "",
+                _ => Text(v.ToString() ?? ""),
             };
             return s.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0 ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
         }
+        /// <summary>Text typed by users (reasons, activities) is never read as a formula when the CSV is opened in Excel.</summary>
+        private static string Text(string s) => s.Length > 0 && "=+-@\t\r".Contains(s[0]) ? "'" + s : s;
         public byte[] Bytes() => Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(_sb.ToString())).ToArray();
     }
 
@@ -52,7 +54,7 @@ public static class ExportService
         foreach (var r in s.Rows)
             for (int m = 0; m < months.Length; m++)
                 foreach (var (scen, val) in new[] { (PlanningInput, r.Planning[m]), (DisciplineComment, r.Discipline[m]), (AfterImplementation, r.After[m]) })
-                    if (Math.Abs(val) > 0) fact.Row(cycle, scen, r.DeptCode, Categories.Label(r.Category), r.ProjectCode, RowKey(r), months[m], val);
+                    if (Math.Abs(val) > 0) fact.Row(cycle, scen, r.DeptCode, Categories.Label(r.CategoryIn(scen)), r.ProjectCode, RowKey(r), months[m], val);
         files["FactWorkload.csv"] = fact;
 
         var items = new Csv("Cycle", "RowKey", "CycleRowKey", "DeptCode", "SubDept", "Category", "ProjectCode", "Activity",
@@ -60,7 +62,10 @@ public static class ExportService
             "Primary Type", "Concern Types", "Implementation Status", "Item Implementation Rate", "Implemented Request MH",
             "Unrequested Change MH", "Requested Phase", "Code Correction", "Months Changed", "Blank Not Applied MH", "Feedback File",
             "Feedback Row", "Brief Categories", "Department Remark", "Blank Retained MH", "Bridge New Work MH", "Bridge Increase MH",
-            "Bridge Extension MH", "Bridge Reduction MH", "Bridge Removed MH", "Master Flag");
+            "Bridge Extension MH", "Bridge Reduction MH", "Bridge Removed MH", "Master Flag", "Project Severity", "Project Severity Points",
+            "Project Severity Order");
+        var sev = projects.ToDictionary(p => p.ProjectCode);
+        var order = new Dictionary<string, int> { ["Critical"] = 1, ["High"] = 2, ["Medium"] = 3, ["Low"] = 4, ["No Concern"] = 5 };
         var bridge = new Csv("Cycle", "RowKey", "CycleRowKey", "ConcernType", "Brief Category");
         var cells = new Csv("Cycle", "RowKey", "CycleRowKey", "DeptCode", "ProjectCode", "Month", "Cell Planning MH", "Discipline Value",
             "Cell Discipline MH", "Change MH", "Cell Implemented MH", "Cell Status", "Blank Note");
@@ -69,21 +74,22 @@ public static class ExportService
             var key = RowKey(r);
             var c = r.Change;
             bool isNew = r.Proposal?.Kind == ProposalKind.NewAllocation, removed = c.Types.Contains("Removed Allocation");
+            var remark = string.Join(" | ", r.Requests.Select(q => q.Reason).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct());
             double share = WorkloadService.ImplementedShare(r);
             double unrequested = Enumerable.Range(0, months.Length).Where(m => !c.MonthsChanged.Contains(m))
                 .Sum(m => Math.Abs(r.After[m] - r.Final[m]));
-            s.Projects.TryGetValue(r.ProjectCode, out var master);
             items.Row(cycle, key, $"{cycle}|{key}", r.DeptCode, r.SectionCode, Categories.Label(r.Category), r.ProjectCode, r.Activity,
                 r.Planning.Sum(), r.Discipline.Sum(), r.After.Sum(), c.GrossIncrease, c.GrossReduction, c.Net, r.Concern,
-                c.Types.FirstOrDefault() ?? "No Change", c.TypesText, WorkloadService.ImplementationStatus(r, s.Cycle.HasAfterData),
+                r.Types.FirstOrDefault() ?? "No Change", r.TypesText, WorkloadService.ImplementationStatus(r, s.Cycle.HasAfterData),
                 r.Concern ? share : null, r.Concern ? share * c.GrossChange : 0, unrequested,
-                r.Proposal?.RequestedCategory is { } rc ? Categories.Label(rc) : "", "",
+                r.CategoryRequest?.RequestedCategory is { } rc ? Categories.Label(rc) : "", "",
                 string.Join(", ", c.MonthsChanged.Select(m => months[m].ToString("MMM-yy"))), 0, "web application", null,
-                c.BriefCategories, r.Proposal?.Reason ?? "", 0,
+                r.BriefCategories, remark, 0,
                 isNew ? c.Net : 0, isNew || removed ? 0 : c.GrossIncrease - c.ExtensionMH - c.EarlyStartMH,
                 isNew || removed ? 0 : c.ExtensionMH + c.EarlyStartMH, isNew || removed ? 0 : c.GrossReduction, removed ? c.Net : 0,
-                master is null ? "" : master.InMaster ? "" : "Not in project master (new or proposal code)");
-            foreach (var t in c.Types) bridge.Row(cycle, key, $"{cycle}|{key}", t, Rules.BriefCategory(t));
+                s.MasterFlag(r.ProjectCode), sev.GetValueOrDefault(r.ProjectCode)?.Level ?? "No Concern",
+                sev.GetValueOrDefault(r.ProjectCode)?.Points ?? 0, order[sev.GetValueOrDefault(r.ProjectCode)?.Level ?? "No Concern"]);
+            foreach (var t in r.Types) bridge.Row(cycle, key, $"{cycle}|{key}", t, Rules.BriefCategory(t));
             foreach (var m in c.MonthsChanged)
                 cells.Row(cycle, key, $"{cycle}|{key}", r.DeptCode, r.ProjectCode, months[m], r.Planning[m],
                     r.Proposal?.Values.FirstOrDefault(v => v.MonthIndex == m)?.ProposedMH, r.Discipline[m],
@@ -95,7 +101,7 @@ public static class ExportService
 
         var depts = new Csv("DeptCode", "Department", "Division", "Service", "Dept Label", "Managers", "LoanTo_Unpaid", "Permanent",
             "Temporary", "Total", "Effective_Heads", "Capacity_MH_per_Month", "Feedback Status", "Feedback Processed", "Sent To Dept",
-            "Comments Received", "As Of");
+            "Comments Received", "As Of", "Cycle");
         foreach (var d in s.Departments.Values.OrderBy(d => d.Code))
         {
             s.Reviews.TryGetValue(d.Code, out var rev);
@@ -103,18 +109,17 @@ public static class ExportService
             depts.Row(d.Code, d.Name, d.ParentCode ?? d.Code, "", $"{d.Code} - {d.Name}", d.Managers, d.LoanToUnpaid, d.Permanent,
                 d.Temporary, d.Managers + d.LoanToUnpaid + d.Permanent + d.Temporary, Rules.EffectiveHeads(d, s.Settings),
                 Rules.CapacityPerMonth(d, s.Settings), status.ToString(),
-                status is DeptReviewStatus.Submitted or DeptReviewStatus.NoChangeConfirmed, null, rev?.SubmittedAt, DateTime.UtcNow);
+                status is DeptReviewStatus.Submitted or DeptReviewStatus.NoChangeConfirmed, null, rev?.SubmittedAt, DateTime.UtcNow, cycle);
         }
         files["DimDepartment.csv"] = depts;
 
         var proj = new Csv("ProjectCode", "Project Name", "Base Code", "Client", "Master Name", "Master Client", "Master Category",
             "Master Flag", "Title Variants", "Project Label", "Severity", "Severity Points", "Depts Concerned", "Departments Raising", "Severity Order");
-        var order = new Dictionary<string, int> { ["Critical"] = 1, ["High"] = 2, ["Medium"] = 3, ["Low"] = 4, ["No Concern"] = 5 };
         foreach (var p in projects)
         {
-            s.Projects.TryGetValue(p.ProjectCode, out var m);
+            var m = s.MasterOf(p.ProjectCode);
             proj.Row(p.ProjectCode, p.Name, Rules.BaseCode(p.ProjectCode), p.Client ?? "", m?.Name ?? "", m?.Client ?? "", m?.MasterCategory ?? "",
-                m is null || !m.InMaster ? "Not in project master (new or proposal code)" : "", "", $"{p.ProjectCode}  {p.Name}",
+                s.MasterFlag(p.ProjectCode), "", $"{p.ProjectCode}  {p.Name}",
                 p.Level, p.Points, p.DeptsRaising, p.Departments, order[p.Level]);
         }
         files["DimProject.csv"] = proj;

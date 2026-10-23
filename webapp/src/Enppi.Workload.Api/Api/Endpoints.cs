@@ -36,6 +36,7 @@ public static class Endpoints
     private static object LineDto(ForecastLine l, int n, Proposal? change, Proposal? category) => new
     {
         l.Id, dept = l.DeptCode, section = l.SectionCode, category = l.Category.ToString(), categoryLabel = Categories.Label(l.Category),
+        approvedCategory = l.ApprovedCategory?.ToString(), afterCategory = l.AfterCategory?.ToString(),
         project = l.ProjectCode, l.Activity, planner = l.PlannerUpn, origin = l.Origin.ToString(),
         corporateControlled = Categories.IsCorporateControlled(l.Category),
         planning = Series(l, n, v => v.PlannerMH), approved = Series(l, n, v => v.ApprovedMH), after = Series(l, n, v => v.AfterMH),
@@ -45,13 +46,15 @@ public static class Endpoints
 
     public static void MapWorkloadApi(this WebApplication app)
     {
-        var api = app.MapGroup("/api").RequireAuthorization();
+        // signed in is not enough: every endpoint needs one of the application roles (Entra app role or Users table)
+        var api = app.MapGroup("/api").RequireAuthorization(p => p.RequireRole(Roles.All));
         var cp = Roles.CorporatePlanning;
 
-        api.MapGet("/me", (CurrentUser u, IConfiguration cfg) => new
+        // who am I - also answers for a signed-in account without a role, so the screen can say "ask for access"
+        app.MapGet("/api/me", (CurrentUser u, IConfiguration cfg) => new
         {
             u.Upn, u.Name, roles = u.RolesList, departments = u.Departments, authMode = cfg["Auth:Mode"],
-        });
+        }).RequireAuthorization();
 
         // ------------------------------------------------------------ reference data
         api.MapGet("/departments", async (WorkloadDbContext db) =>
@@ -82,7 +85,8 @@ public static class Endpoints
             await wf.UpdateDueDatesAsync(id, d.PlannerDue, d.ReviewDue, d.ApprovalDue);
             return Results.NoContent();
         }).RequireAuthorization(cp);
-        api.MapGet("/cycles/{id:int}/dashboard", async (int id, WorkloadService ws) => WorkloadService.Dashboard(await ws.SnapshotAsync(id)));
+        api.MapGet("/cycles/{id:int}/dashboard", async (int id, WorkloadService ws, CurrentUser u) =>
+            WorkloadService.Dashboard(await ws.SnapshotAsync(id, u.Scope)));
 
         // ------------------------------------------------------------ lines (planner grid)
         api.MapGet("/cycles/{id:int}/lines", async (int id, string? dept, string? project, bool? mine, WorkloadDbContext db, CurrentUser u) =>
@@ -126,9 +130,13 @@ public static class Endpoints
             var d = await db.Departments.AsNoTracking().FirstOrDefaultAsync(x => x.Code == dept);
             if (d is null) return Results.NotFound();
             var s = await db.LoadSettingsAsync();
-            var lines = await db.Lines.AsNoTracking().Include(l => l.Values).Where(l => l.CycleId == id && l.DeptCode == dept)
-                .OrderBy(l => l.Category).ThenBy(l => l.ProjectCode).ToListAsync();
             var props = await db.Proposals.AsNoTracking().Include(p => p.Values).Where(p => p.CycleId == id && p.DeptCode == dept).ToListAsync();
+            // the department reviews its Planning Input lines; lines carrying its new-allocation requests are listed with
+            // the requests, and lines found only in the after extract are not part of the review
+            var requestLines = props.Where(p => p.Kind == ProposalKind.NewAllocation && p.LineId != null).Select(p => p.LineId!.Value).ToHashSet();
+            var lines = (await db.Lines.AsNoTracking().Include(l => l.Values).Where(l => l.CycleId == id && l.DeptCode == dept)
+                .OrderBy(l => l.Category).ThenBy(l => l.ProjectCode).ToListAsync())
+                .Where(l => !requestLines.Contains(l.Id) && l.Origin != LineOrigin.AfterExtract && l.Origin != LineOrigin.DepartmentRequest).ToList();
             var review = await db.DepartmentReviews.AsNoTracking().FirstOrDefaultAsync(r => r.CycleId == id && r.DeptCode == dept);
             return Results.Ok(new
             {
@@ -141,13 +149,13 @@ public static class Endpoints
                 lines = lines.Select(l => LineDto(l, c.MonthCount,
                     props.FirstOrDefault(p => p.LineId == l.Id && p.Kind == ProposalKind.Change),
                     props.FirstOrDefault(p => p.LineId == l.Id && p.Kind == ProposalKind.CategoryChange))),
-                newAllocations = props.Where(p => p.Kind == ProposalKind.NewAllocation && p.LineId == null).Select(p => ProposalDto(p, c.MonthCount)),
+                newAllocations = props.Where(p => p.Kind == ProposalKind.NewAllocation).OrderBy(p => p.Id).Select(p => ProposalDto(p, c.MonthCount)),
             });
         });
         api.MapPost("/cycles/{id:int}/proposals", async (int id, ProposalInput input, WorkflowService wf) =>
         {
-            var p = await wf.SaveProposalAsync(id, input);
-            return Results.Ok(new { p.Id, status = p.Status.ToString(), p.ChangeTypes, removed = p.Id == 0 });
+            var (p, removed) = await wf.SaveProposalAsync(id, input);
+            return Results.Ok(new { id = removed ? 0 : p.Id, status = p.Status.ToString(), p.ChangeTypes, removed });
         });
         api.MapDelete("/cycles/{id:int}/proposals/{pid:int}", async (int id, int pid, WorkflowService wf) =>
         {
@@ -170,20 +178,30 @@ public static class Endpoints
         {
             var s = await ws.SnapshotAsync(id);
             var sev = WorkloadService.Projects(s).ToDictionary(p => p.ProjectCode);
-            return s.Rows.Where(r => r.Proposal is not null)
-                .OrderBy(r => r.Proposal!.Status == ProposalStatus.Submitted ? 0 : 1)
-                .ThenByDescending(r => sev.TryGetValue(r.ProjectCode, out var q) ? q.Points : 0)
-                .ThenByDescending(r => Math.Abs(r.Change.Net))
-                .Select(r => new
+            // one entry per request: a man-hour change and a category move on the same row are decided separately
+            return s.Rows.SelectMany(r => r.Requests.Select(q => (r, q)))
+                .OrderBy(x => x.q.Status == ProposalStatus.Submitted ? 0 : 1)
+                .ThenByDescending(x => sev.TryGetValue(x.r.ProjectCode, out var q) ? q.Points : 0)
+                .ThenByDescending(x => Math.Abs(x.r.Change.Net))
+                .Select(x =>
             {
-                proposal = ProposalDto(r.Proposal!, s.Cycle.MonthCount), r.LineId, dept = r.DeptCode, section = r.SectionCode,
-                category = Categories.Label(r.Category), project = r.ProjectCode, r.Activity,
-                planning = r.Planning, discipline = r.Discipline, final = r.Final,
-                change = new { types = r.Change.Types, r.Change.GrossIncrease, r.Change.GrossReduction, r.Change.Net, r.Change.ExtensionMH,
-                               r.Change.BriefCategories, monthsChanged = r.Change.MonthsChanged },
-                severity = sev.TryGetValue(r.ProjectCode, out var p) ? p.Level : "Low", points = p?.Points ?? 0,
-                projectDepartments = p?.Departments, projectName = p?.Name,
-                implementation = WorkloadService.ImplementationStatus(r, s.Cycle.HasAfterData),
+                var (r, q) = x;
+                bool move = q.Kind == ProposalKind.CategoryChange;
+                sev.TryGetValue(r.ProjectCode, out var p);
+                return new
+                {
+                    proposal = ProposalDto(q, s.Cycle.MonthCount), r.LineId, dept = r.DeptCode, section = r.SectionCode,
+                    category = Categories.Label(r.Category), project = r.ProjectCode, r.Activity,
+                    planning = r.Planning, discipline = r.Discipline, final = r.Final,
+                    change = move
+                        ? new { types = (IReadOnlyList<string>)new[] { "Phase Transfer" }, GrossIncrease = 0.0, GrossReduction = 0.0, Net = 0.0,
+                                ExtensionMH = 0.0, BriefCategories = "Phase Transfer", monthsChanged = (IReadOnlyList<int>)Array.Empty<int>() }
+                        : new { types = r.Change.Types, r.Change.GrossIncrease, r.Change.GrossReduction, r.Change.Net, r.Change.ExtensionMH,
+                                r.Change.BriefCategories, monthsChanged = r.Change.MonthsChanged },
+                    severity = p?.Level ?? "Low", points = p?.Points ?? 0,
+                    projectDepartments = p?.Departments, projectName = p?.Name,
+                    implementation = WorkloadService.ImplementationStatus(r, s.Cycle.HasAfterData, q),
+                };
             });
         }).RequireAuthorization(policy => policy.RequireRole(cp, Roles.Viewer));
         api.MapPost("/proposals/{pid:int}/decision", async (int pid, DecisionInput input, WorkflowService wf) =>
@@ -225,6 +243,8 @@ public static class Endpoints
         {
             var c = await db.Cycles.FirstOrDefaultAsync(x => x.Id == id, ct);
             if (c is null) return Results.NotFound();
+            if (c.Status is not (CycleStatus.DisciplineReview or CycleStatus.Approval))
+                throw new RuleException("Reminders go out while departments can still submit (discipline review, or approval for returned departments).");
             return Results.Ok(new { sent = await ReminderService.SendDueRemindersAsync(db, sender, c, DateOnly.FromDateTime(DateTime.UtcNow), true, ct) });
         }).RequireAuthorization(cp);
         api.MapGet("/cycles/{id:int}/notifications", async (int id, WorkloadDbContext db) =>
@@ -235,25 +255,33 @@ public static class Endpoints
             .RequireAuthorization(policy => policy.RequireRole(cp, Roles.Admin));
 
         // ------------------------------------------------------------ reports and implementation
-        api.MapGet("/cycles/{id:int}/reports/departments", async (int id, WorkloadService ws) => WorkloadService.Departments(await ws.SnapshotAsync(id)));
-        api.MapGet("/cycles/{id:int}/reports/projects", async (int id, WorkloadService ws) => WorkloadService.Projects(await ws.SnapshotAsync(id)));
+        // a discipline manager's reports cover their departments; Corporate Planning, viewers, administrators and planners see all
+        api.MapGet("/cycles/{id:int}/reports/departments", async (int id, WorkloadService ws, CurrentUser u) =>
+            WorkloadService.Departments(await ws.SnapshotAsync(id, u.Scope)));
+        api.MapGet("/cycles/{id:int}/reports/projects", async (int id, WorkloadService ws, CurrentUser u) =>
+            WorkloadService.Projects(await ws.SnapshotAsync(id, u.Scope)));
         api.MapGet("/cycles/{id:int}/reports/deviations", async (int id, WorkloadService ws, CurrentUser u) =>
-        {
-            var rows = WorkloadService.DeviationRegister(await ws.SnapshotAsync(id));
-            return u.CanSeeAll || u.Is(Roles.Planner) ? rows : rows.Where(r => u.Departments.Contains(r.Dept));
-        });
+            WorkloadService.DeviationRegister(await ws.SnapshotAsync(id, u.Scope)));
         api.MapGet("/cycles/{id:int}/implementation", async (int id, WorkloadService ws, CurrentUser u) =>
         {
-            var s = await ws.SnapshotAsync(id);
-            return s.Rows.Where(r => r.Proposal is { Status: ProposalStatus.Approved or ProposalStatus.PartiallyApproved })
-                .Where(r => u.CanSeeAll || r.PlannerUpn == null || r.PlannerUpn == u.Upn)
-                .Select(r => new
+            var s = await ws.SnapshotAsync(id, u.Scope);
+            return s.Rows.SelectMany(r => r.Requests.Where(q => q.Status is ProposalStatus.Approved or ProposalStatus.PartiallyApproved)
+                                                    .Select(q => (r, q)))
+                .Where(x => u.CanSeeAll || u.Scope is not null || x.r.PlannerUpn == null || x.r.PlannerUpn == u.Upn)
+                .Select(x =>
                 {
-                    proposalId = r.ProposalId, r.LineId, dept = r.DeptCode, category = Categories.Label(r.Category), project = r.ProjectCode,
-                    r.Activity, planner = r.PlannerUpn, planning = r.Planning.Sum(), final = r.Final.Sum(), after = r.After.Sum(),
-                    types = r.Change.TypesText, status = WorkloadService.ImplementationStatus(r, s.Cycle.HasAfterData),
-                    implementedAt = r.Proposal!.ImplementedAt, implementedBy = r.Proposal.ImplementedBy,
-                    finalByMonth = r.Final, planningByMonth = r.Planning, monthsChanged = r.Change.MonthsChanged,
+                    var (r, q) = x;
+                    bool move = q.Kind == ProposalKind.CategoryChange;
+                    return new
+                    {
+                        proposalId = q.Id, r.LineId, dept = r.DeptCode, category = Categories.Label(r.Category), project = r.ProjectCode,
+                        r.Activity, planner = r.PlannerUpn, planning = r.Planning.Sum(), final = r.Final.Sum(), after = r.After.Sum(),
+                        types = move ? $"Move to {Categories.Label(q.RequestedCategory ?? r.Category)}" : r.Change.TypesText,
+                        status = WorkloadService.ImplementationStatus(r, s.Cycle.HasAfterData, q),
+                        implementedAt = q.ImplementedAt, implementedBy = q.ImplementedBy,
+                        finalByMonth = r.Final, planningByMonth = r.Planning,
+                        monthsChanged = move ? (IReadOnlyList<int>)Array.Empty<int>() : r.Change.MonthsChanged,
+                    };
                 });
         });
         api.MapPost("/proposals/{pid:int}/implemented", async (int pid, WorkflowService wf) =>
@@ -312,20 +340,28 @@ public static class Endpoints
         admin.MapPut("/users", async (UserInput input, WorkloadDbContext db, CurrentUser u) =>
         {
             if (!Roles.All.Contains(input.Role)) return Results.BadRequest(new { error = $"Role must be one of {string.Join(", ", Roles.All)}" });
-            var upn = input.Upn.Trim().ToLowerInvariant();
+            var upn = WorkflowService.Text(input.Upn, 120, "The sign-in name").ToLowerInvariant();
+            if (upn.Length == 0) return Results.BadRequest(new { error = "Give the user's sign-in name (UPN)." });
             var acc = await db.Users.FindAsync(upn);
             if (acc is null) db.Users.Add(acc = new UserAccount { Upn = upn });
-            (acc.DisplayName, acc.Role, acc.DeptCodes, acc.Email, acc.IsActive) = (input.DisplayName, input.Role, input.DeptCodes, input.Email, input.IsActive);
+            (acc.DisplayName, acc.Role, acc.DeptCodes, acc.Email, acc.IsActive) = (WorkflowService.Text(input.DisplayName, 120, "The name"), input.Role,
+                WorkflowService.Text(input.DeptCodes, 200, "The department list") is { Length: > 0 } dc ? dc : null,
+                WorkflowService.Text(input.Email, 200, "The e-mail") is { Length: > 0 } em ? em : null, input.IsActive);
             db.Log(u.Upn, "SaveUser", "User", upn, null, $"{input.Role} {input.DeptCodes}");
             await db.SaveChangesAsync();
             return Results.Ok(acc);
         }).RequireAuthorization(policy => policy.RequireRole(Roles.Admin));
         admin.MapPut("/departments/{code}", async (string code, DepartmentInput input, WorkloadDbContext db, CurrentUser u) =>
         {
+            if (code.Length > 8) return Results.BadRequest(new { error = "Department codes have at most 8 characters." });
+            if (new[] { input.Permanent, input.Temporary, input.Managers, input.LoanToUnpaid }.Any(x => x is < 0 or > 100_000))
+                return Results.BadRequest(new { error = "Headcounts must be between 0 and 100,000." });
             var d = await db.Departments.FindAsync(code);
             if (d is null) db.Departments.Add(d = new Department { Code = code });
             (d.Name, d.ParentCode, d.Permanent, d.Temporary, d.Managers, d.LoanToUnpaid, d.IsActive) =
-                (input.Name, input.ParentCode, input.Permanent, input.Temporary, input.Managers, input.LoanToUnpaid, input.IsActive);
+                (WorkflowService.Text(input.Name, 120, "The department name"),
+                 WorkflowService.Text(input.ParentCode, 8, "The parent code") is { Length: > 0 } pc ? pc : null,
+                 input.Permanent, input.Temporary, input.Managers, input.LoanToUnpaid, input.IsActive);
             db.Log(u.Upn, "SaveDepartment", "Department", code, null, $"perm {input.Permanent}, temp {input.Temporary}");
             await db.SaveChangesAsync();
             return Results.Ok(d);
@@ -333,6 +369,8 @@ public static class Endpoints
         admin.MapPut("/settings", async (Dictionary<string, double> values, WorkloadDbContext db, CurrentUser u) =>
         {
             var known = typeof(WorkloadSettings).GetProperties().Select(p => p.Name).ToHashSet();
+            if (values.Any(kv => known.Contains(kv.Key) && (!double.IsFinite(kv.Value) || kv.Value < 0 || kv.Value > 1_000_000)))
+                return Results.BadRequest(new { error = "Settings must be non-negative numbers." });
             foreach (var (k, v) in values.Where(kv => known.Contains(kv.Key)))
             {
                 var s = await db.Settings.FindAsync(k);
@@ -341,7 +379,7 @@ public static class Endpoints
             }
             db.Log(u.Upn, "SaveSettings", "Settings", "*", null, string.Join(", ", values.Select(kv => $"{kv.Key}={kv.Value}")));
             await db.SaveChangesAsync();
-            return await db.LoadSettingsAsync();
+            return Results.Ok(await db.LoadSettingsAsync());
         }).RequireAuthorization(policy => policy.RequireRole(Roles.Admin));
     }
 

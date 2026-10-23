@@ -126,9 +126,9 @@ function AddLine({ cycle, onClose, onSaved }: { cycle: Cycle; onClose: () => voi
         <div className="row">
           <label className="field">Department<select value={dept} onChange={e => setDept(e.target.value)}><option value="" />{depts?.map(d => <option key={d.code} value={d.code}>{d.code} {d.name}</option>)}</select></label>
           <label className="field">Category<select value={category} onChange={e => setCategory(e.target.value as Category)}>{cats.map(c => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}</select></label>
-          <label className="field">Project code (from the master)<input value={code} onChange={e => setCode(e.target.value)} /></label>
+          <label className="field">Project code (from the master)<input maxLength={20} value={code} onChange={e => setCode(e.target.value)} /></label>
         </div>
-        <label className="field">Activity<input value={activity} onChange={e => setActivity(e.target.value)} /></label>
+        <label className="field">Activity<input maxLength={250} value={activity} onChange={e => setActivity(e.target.value)} /></label>
         <div className="table-wrap grid"><table><thead><tr>{vals.map((_, i) => <th key={i} className="num">{monthLabel(cycle.firstMonth, i)}</th>)}</tr></thead>
           <tbody><tr>{vals.map((v, i) => <td key={i} className="m"><input className="plan" value={v} onChange={e => setVals(x => x.map((y, k) => (k === i ? e.target.value : y)))} /></td>)}</tr></tbody></table></div>
         <ErrorMsg error={err} />

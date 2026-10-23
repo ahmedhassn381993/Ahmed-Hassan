@@ -75,8 +75,12 @@ public class ReminderService(IServiceScopeFactory scopes, IConfiguration config,
     {
         var settings = await db.LoadSettingsAsync(ct);
         if (!force && (c.ReviewDue is null || today < c.ReviewDue.Value.AddDays(-settings.ReminderDaysBefore))) return 0;
-        var open = await db.DepartmentReviews.Where(r => r.CycleId == c.Id &&
-                (r.Status == DeptReviewStatus.NotStarted || r.Status == DeptReviewStatus.InProgress || r.Status == DeptReviewStatus.Returned))
+        // during discipline review every department that has not submitted; during approval only returned departments,
+        // the only ones that can still change their review
+        if (c.Status is not (CycleStatus.DisciplineReview or CycleStatus.Approval)) return 0;
+        bool review = c.Status == CycleStatus.DisciplineReview;
+        var open = await db.DepartmentReviews.Where(r => r.CycleId == c.Id && (r.Status == DeptReviewStatus.Returned ||
+                (review && (r.Status == DeptReviewStatus.NotStarted || r.Status == DeptReviewStatus.InProgress))))
             .ToListAsync(ct);
         var managers = await db.Users.AsNoTracking().Where(u => u.IsActive && u.Role == Roles.DisciplineManager).ToListAsync(ct);
         var names = await db.Departments.AsNoTracking().ToDictionaryAsync(d => d.Code, d => d.Name, ct);

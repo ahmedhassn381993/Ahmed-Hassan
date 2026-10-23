@@ -62,7 +62,8 @@ export default function QueuePage() {
           </tbody>
         </table>
       </div>
-      {open && <Decision cycle={cycle} item={open} canDecide={cp && cycle.status !== 'Locked'} onClose={() => setOpen(null)}
+      {open && <Decision cycle={cycle} item={open} canDecide={cp && cycle.status !== 'Locked' && !['Draft', 'Returned'].includes(open.proposal.status)}
+                         onClose={() => setOpen(null)}
                          onDone={() => { setOpen(null); reload(); }} />}
     </div>
   );
@@ -72,6 +73,7 @@ function Decision({ cycle, item, canDecide, onClose, onDone }: { cycle: Cycle; i
   const { toast } = useApp();
   const n = cycle.monthCount;
   const p = item.proposal;
+  const move = p.kind === 'CategoryChange';
   const active = Array.from({ length: n }, (_, i) => i).filter(i => item.planning[i] || item.discipline[i] || p.values[i] !== null);
   const [approved, setApproved] = useState<string[]>(() => Array.from({ length: n }, (_, i) =>
     p.approved[i] !== null && p.approved[i] !== undefined ? String(p.approved[i]) : p.values[i] !== null && p.values[i] !== undefined ? String(p.values[i]) : ''));
@@ -98,6 +100,9 @@ function Decision({ cycle, item, canDecide, onClose, onDone }: { cycle: Cycle; i
           <button className="link" onClick={onClose} aria-label="Close">✕</button>
         </div>
         <p className="muted">{item.activity} · {item.category}</p>
+        {move && <div className="card"><h3>Category change</h3>
+          <p style={{ margin: 0 }}>Move this row from <strong>{item.category}</strong> to <strong>{CATEGORY_LABEL[p.requestedCategory as Category]}</strong>.
+            The man-hours stay as they are; any change to them is a separate request.</p></div>}
         <div className="row" style={{ marginBottom: 12 }}>
           <Severity level={item.severity} /><StatusBadge status={p.status} />
           <span className="small">{item.change.types.join('; ')}</span>
@@ -108,7 +113,7 @@ function Decision({ cycle, item, canDecide, onClose, onDone }: { cycle: Cycle; i
           <p style={{ margin: 0 }}>{p.reason || <span className="muted">(none)</span>}</p>
           <div className="small muted" style={{ marginTop: 6 }}>Submitted by {p.createdBy}{p.submittedAt ? ` on ${new Date(p.submittedAt).toLocaleString('en-GB')}` : ''}</div>
         </div>
-        <div className="card">
+        {!move && <div className="card">
           <h3>Month by month</h3>
           <div className="table-wrap grid">
             <table>
@@ -126,19 +131,22 @@ function Decision({ cycle, item, canDecide, onClose, onDone }: { cycle: Cycle; i
             </table>
           </div>
           <p className="small muted">A blank approve cell keeps the planner value. Edit the figures to approve part of the request.</p>
-        </div>
+        </div>}
         {canDecide ? (
           <div className="card">
-            <label className="field">Comment to the department (required to return or reject)<textarea rows={3} value={comment} onChange={e => setComment(e.target.value)} /></label>
+            <label className="field">Comment to the department (required to return or reject)<textarea rows={3} maxLength={2000} value={comment} onChange={e => setComment(e.target.value)} /></label>
             <ErrorMsg error={err} />
             <div className="row" style={{ marginTop: 10 }}>
               <button className="good" onClick={() => decide('approve')}>Approve as requested</button>
-              <button className="primary" onClick={() => decide('partial')}>Approve edited values</button>
+              {!move && <button className="primary" onClick={() => decide('partial')}>Approve edited values</button>}
               <button onClick={() => decide('return')}>Return for revision</button>
               <button className="danger" onClick={() => decide('reject')}>Reject</button>
             </div>
           </div>
-        ) : p.reviewComment && <div className="card"><h3>Decision</h3><p>{p.reviewComment}</p><div className="small muted">{p.reviewedBy}</div></div>}
+        ) : <>
+          {p.status === 'Returned' && <p className="small muted">Returned to the department; it can be decided again once the department resubmits it.</p>}
+          {p.reviewComment && <div className="card"><h3>Decision</h3><p>{p.reviewComment}</p><div className="small muted">{p.reviewedBy}</div></div>}
+        </>}
       </div>
     </div>
   );

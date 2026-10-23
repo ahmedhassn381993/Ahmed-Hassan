@@ -186,6 +186,9 @@ namespace Enppi.Workload.Api.Data.Migrations
                         .HasMaxLength(120)
                         .HasColumnType("nvarchar(120)");
 
+                    b.Property<string>("LockedCapacity")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<int>("MonthCount")
                         .HasColumnType("int");
 
@@ -225,6 +228,14 @@ namespace Enppi.Workload.Api.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(250)
                         .HasColumnType("nvarchar(250)");
+
+                    b.Property<string>("AfterCategory")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("ApprovedCategory")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("Category")
                         .IsRequired()
