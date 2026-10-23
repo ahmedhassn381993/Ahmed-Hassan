@@ -179,8 +179,28 @@ def load_copilot_fact(xlsx: str | Path, issues: list[dict]) -> pd.DataFrame:
     df.loc[df["ZeroOrBlankUnknown"], "MH"] = float("nan")   # blank feedback = no revision
     df["IsBlank"] = df["MH"].isna()
     df["FontRed"], df["CellFill"], df["RowFill"], df["CellComment"] = False, "", "", ""
-    df["SourceType"] = "Copilot fact table (validated)"
+    df["SourceType"] = "Copilot fact table"
     return _finish(df)
+
+
+def _department_of_rows(path: Path, dept_file: str, d: pd.DataFrame, scenario: str, issues: list[dict]):
+    """The department of each row. A file for a parent department (Piping returns one 2400-c file for 2410-2450) is
+    split by its sub-department headers; a file for any other unknown department stops the run, because its rows
+    would otherwise be counted as new work outside the 26 departments."""
+    from analysis import DEPARTMENTS
+    if dept_file in DEPARTMENTS:
+        return dept_file
+    sections = d["section_code"].astype(str)
+    if len(sections) and sections.isin(list(DEPARTMENTS)).all():
+        issues.append(dict(Severity="Info", Area="Source workbook", Scenario=scenario, File=path.name,
+                           Issue=f"One file for department {dept_file}, split by its sub-department headers",
+                           Detail=", ".join(f"{c}: {n} rows" for c, n in sections.value_counts().sort_index().items()),
+                           Impact_MH=None))
+        return sections.values
+    unknown = sorted(set(sections) - set(DEPARTMENTS))
+    raise SystemExit(f"{path.name}: department {dept_file} is not one of the {len(DEPARTMENTS)} departments, and rows under "
+                     f"{', '.join(unknown)} have no sub-department header naming one. Rename the file to its department code "
+                     "(e.g. 2410-c.xlsx) or add the sub-department headers, then run again.")
 
 
 def load_workbook_folder(folder: str | Path, scenario: str, issues: list[dict]) -> pd.DataFrame:
@@ -196,8 +216,9 @@ def load_workbook_folder(folder: str | Path, scenario: str, issues: list[dict]) 
         if not pw.records:
             continue
         d = pd.DataFrame([asdict(r) for r in pw.records])
+        dept = _department_of_rows(path, pw.dept_file, d, scenario, issues)
         frames.append(pd.DataFrame({
-            "Scenario": scenario, "DeptCode": pw.dept_file, "SectionCode": d["section_code"],
+            "Scenario": scenario, "DeptCode": dept, "SectionCode": d["section_code"],
             "Phase": d["phase"], "ProjectFull": d["project_full"], "ProjectBase": d["project_base"],
             "ProjectSuffix": d["project_suffix"],
             "ActivityName": d["activity"].str.replace(r"\s+", " ", regex=True).str.strip(),
@@ -278,6 +299,40 @@ def _resolve_inferred_sections(df: pd.DataFrame, issues: list[dict]) -> pd.DataF
     return df[~drop].reset_index(drop=True)
 
 
+def compare_with_files(fact: pd.DataFrame, direct: pd.DataFrame, covered: set) -> list[dict]:
+    """Compare the Copilot table with every department file read directly, project code by month (phase and
+    sub-department labels aside). The file is what the analysis uses; each difference is logged, with one summary line,
+    so the Copilot table is never called validated where it is not."""
+    out, n = [], 0
+    def coded(x):
+        code = x["ProjectFull"].fillna("").astype(str)
+        return x[(code != "") & ~code.str.startswith("UNCODED")]
+    for sc, dept in sorted(covered):
+        f = coded(fact[(fact["Scenario"] == sc) & (fact["DeptCode"] == dept)])
+        if f.empty:
+            continue
+        n += 1
+        d = coded(direct[(direct["Scenario"] == sc) & (direct["DeptCode"] == dept)])
+        a = f.groupby(["ProjectFull", "Month"])["MH"].sum(min_count=1).fillna(0)
+        b = d.groupby(["ProjectFull", "Month"])["MH"].sum(min_count=1).fillna(0)
+        diff = a.subtract(b, fill_value=0)
+        bad = diff[diff.abs() >= 0.5]
+        if bad.empty:
+            continue
+        top = bad.reindex(bad.abs().sort_values(ascending=False).index).head(3)
+        out.append(dict(Severity="Medium", Area="Copilot check", Scenario=sc, File=dept,
+                        Issue="Copilot table differs from the department file (the file is used)",
+                        Detail=f"{len(bad):,} of {len(a.index.union(b.index)):,} project-month cells differ, {bad.abs().sum():,.0f} MH; "
+                               "largest (Copilot minus file): " + "; ".join(f"{c} {pd.Timestamp(m):%b-%y} {v:+,.0f}"
+                                                                           for (c, m), v in top.items()),
+                        Impact_MH=float(bad.abs().sum())))
+    if n:
+        out.append(dict(Severity="Info", Area="Copilot check", Scenario="(all)", File="(all)",
+                        Issue="Copilot table compared with the department files read directly",
+                        Detail=f"{n} files compared project by month; {len(out)} differ", Impact_MH=None))
+    return out
+
+
 def build(copilot_fact: str | None = None, folders: dict[str, str] | None = None,
           window: tuple[dt.date, dt.date] | None = None) -> tuple[pd.DataFrame, list[dict]]:
     """Combine sources; workbook folders override the Copilot fact per (scenario, department)."""
@@ -294,6 +349,7 @@ def build(copilot_fact: str | None = None, folders: dict[str, str] | None = None
         fact = load_copilot_fact(copilot_fact, fact_issues)
         covered = set(zip(direct["Scenario"], direct["DeptCode"])) if len(direct) else set()
         if covered:
+            issues += compare_with_files(fact, direct, covered)
             fact = fact[[(s, d) not in covered for s, d in zip(fact["Scenario"], fact["DeptCode"])]]
         # keep Copilot-model findings for every file (they explain its totals); drop only the
         # row-level code warnings for files that were re-read from source

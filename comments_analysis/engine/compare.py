@@ -78,6 +78,19 @@ def _pair_code_corrections(df: pd.DataFrame, issues: list[dict]) -> pd.DataFrame
             continue
         mp = cands.loc[scores.idxmax()]
         miss_p = miss_p.drop(scores.idxmax())
+        if str(nd.ProjectFull).startswith("UNCODED") or not str(nd.ProjectFull):
+            # the department dropped the code from the title: keep the planner's code, never the surrogate key
+            sel = ((df["Scenario"] == "Discipline Comment") & (df["DeptCode"] == nd.DeptCode) & (df["SectionCode"] == nd.SectionCode)
+                   & (df["Phase"] == nd.Phase) & (df["ProjectKey"] == nd.ProjectKey))
+            src = df[(df["Scenario"] == "Planning Input") & (df["DeptCode"] == mp.DeptCode) & (df["SectionCode"] == mp.SectionCode)
+                     & (df["Phase"] == mp.Phase) & (df["ProjectKey"] == mp.ProjectKey)].iloc[0]
+            for col in ("ProjectKey", "ProjectFull", "ProjectBase", "ProjectSuffix"):
+                if col in df.columns:
+                    df.loc[sel, col] = src[col]
+            issues.append(dict(Severity="Low", Area="Project code", Scenario="Discipline Comment", File=f"{nd.DeptCode}",
+                               Issue="Project code missing in the feedback row (paired to the planner's row by title)",
+                               Detail=f"{mp.ProjectFull} ({scores.max():.0%} title match): {nd.ActivityName[:60]}", Impact_MH=None))
+            continue
         for sc in ("Planning Input", "System Implementation"):
             sel = ((df["Scenario"] == sc) & (df["DeptCode"] == mp.DeptCode) & (df["SectionCode"] == mp.SectionCode)
                    & (df["Phase"] == mp.Phase) & (df["ProjectKey"] == mp.ProjectKey))
@@ -106,6 +119,7 @@ def _pair_phase_moves(df: pd.DataFrame, issues: list[dict]) -> pd.DataFrame:
     new_d = d[[tuple(x) not in pk for x in d[KEY].values]]
     miss_p = p[[tuple(x) not in dk for x in p[KEY].values]]
     moved_by_file: dict[str, list[str]] = {}
+    requested: dict[tuple, tuple[str, str]] = {}   # (dept, section, key) -> (baseline phase, requested phase)
     for _, nd in new_d.iterrows():
         m = miss_p[(miss_p["DeptCode"] == nd.DeptCode) & (miss_p["SectionCode"] == nd.SectionCode) &
                    (miss_p["ProjectKey"] == nd.ProjectKey) & (miss_p["Phase"] != nd.Phase)]
@@ -117,6 +131,7 @@ def _pair_phase_moves(df: pd.DataFrame, issues: list[dict]) -> pd.DataFrame:
                (df["SectionCode"] == nd.SectionCode) & (df["Phase"] == nd.Phase) & (df["ProjectKey"] == nd.ProjectKey))
         df.loc[sel, "RequestedPhase"] = nd.Phase
         df.loc[sel, "Phase"] = mp.Phase
+        requested[(nd.DeptCode, nd.SectionCode, nd.ProjectKey)] = (mp.Phase, nd.Phase)
         moved_by_file.setdefault(nd.DeptCode, []).append(f"{nd.ProjectKey}: {mp.Phase} -> {nd.Phase}")
     for dept, moves in moved_by_file.items():
         issues.append(dict(Severity="High" if len(moves) >= 3 else "Medium", Area="Phase transfer",
@@ -138,10 +153,24 @@ def _pair_phase_moves(df: pd.DataFrame, issues: list[dict]) -> pd.DataFrame:
     i_phases = set(zip(i["DeptCode"], i["SectionCode"], i["Phase"]))
     paired: dict[str, list[str]] = {}
     moved: dict[str, list[str]] = {}
+    implemented: dict[str, list[str]] = {}
+    df["PhaseImplemented"] = False
     for _, ni in orphan_i.iterrows():
         m = free_p[(free_p["DeptCode"] == ni.DeptCode) & (free_p["SectionCode"] == ni.SectionCode) &
                    (free_p["ProjectKey"] == ni.ProjectKey) & (free_p["Phase"] != ni.Phase)]
         if m.empty:
+            continue
+        rq = requested.get((ni.DeptCode, ni.SectionCode, ni.ProjectKey))
+        if rq and rq[1] == ni.Phase and (m["Phase"] == rq[0]).any():
+            # the planner filed the project under the phase the department asked for: the request is implemented
+            idx = m.index[m["Phase"] == rq[0]][0]
+            free_p = free_p.drop(idx)
+            sel = ((df["Scenario"] == "System Implementation") & (df["DeptCode"] == ni.DeptCode) &
+                   (df["SectionCode"] == ni.SectionCode) & (df["Phase"] == ni.Phase) & (df["ProjectKey"] == ni.ProjectKey))
+            df.loc[sel, "Phase"] = rq[0]
+            df.loc[(df["DeptCode"] == ni.DeptCode) & (df["SectionCode"] == ni.SectionCode) & (df["Phase"] == rq[0]) &
+                   (df["ProjectKey"] == ni.ProjectKey), "PhaseImplemented"] = True
+            implemented.setdefault(ni.DeptCode, []).append(f"{ni.ProjectKey}: {rq[0]} -> {ni.Phase}")
             continue
         mp = m.iloc[0]
         if (ni.DeptCode, ni.SectionCode, mp.Phase) in i_phases:
@@ -155,6 +184,10 @@ def _pair_phase_moves(df: pd.DataFrame, issues: list[dict]) -> pd.DataFrame:
     for dept, moves in paired.items():
         issues.append(dict(Severity="Medium", Area="After-implementation data", Scenario="System Implementation", File=dept,
                            Issue="After rows filed under another phase (missing phase headings) - paired to planning by code",
+                           Detail="; ".join(moves), Impact_MH=None))
+    for dept, moves in implemented.items():
+        issues.append(dict(Severity="Low", Area="After-implementation data", Scenario="System Implementation", File=dept,
+                           Issue="Requested category change implemented by the planner (after row paired to its baseline)",
                            Detail="; ".join(moves), Impact_MH=None))
     for dept, moves in moved.items():
         issues.append(dict(Severity="Medium", Area="After-implementation data", Scenario="System Implementation", File=dept,
@@ -170,7 +203,8 @@ def three_way(df: pd.DataFrame, issues: list[dict]) -> tuple[pd.DataFrame, pd.Da
     attrs = (df.sort_values("ScenarioOrder").groupby(KEY)
              .agg(Category=("Category", "first"), ProjectFull=("ProjectFull", "last"),
                   ProjectBase=("ProjectBase", "last"), ProjectSuffix=("ProjectSuffix", "last"),
-                  CodeCorrection=("CodeCorrection", "max"), RequestedPhase=("RequestedPhase", "max")).reset_index())
+                  CodeCorrection=("CodeCorrection", "max"), RequestedPhase=("RequestedPhase", "max"),
+                  PhaseImplemented=("PhaseImplemented", "max")).reset_index())
     names = df.drop_duplicates(["Scenario"] + KEY).pivot_table(index=KEY, columns="Scenario", values="ActivityName", aggfunc="first")
     names = names.rename(columns={"Planning Input": "P_Name", "Discipline Comment": "D_Name", "System Implementation": "I_Name"})
     srcrow = df.drop_duplicates(["Scenario"] + KEY).pivot_table(index=KEY, columns="Scenario", values="SourceRow", aggfunc="first")
@@ -180,7 +214,9 @@ def three_way(df: pd.DataFrame, issues: list[dict]) -> tuple[pd.DataFrame, pd.Da
                   D_Remark=("Remark", "max"), D_TypedCode=("TypedCode", "max"))
              )
     rows = attrs.set_index(KEY).join(names).join(srcrow).join(dmeta).reset_index()
-    for c in ("P_Name", "D_Name", "I_Name"):
+    # a scenario that is absent (no after-implementation extract yet, or no feedback) still gets its columns
+    for c in ("P_Name", "D_Name", "I_Name", "P_Row", "D_Row", "I_Row", "D_File", "D_SourceType", "D_RowFill", "D_Remark",
+              "D_TypedCode"):
         if c not in rows:
             rows[c] = np.nan
     rows["P_Exists"], rows["D_Exists"], rows["I_Exists"] = rows["P_Name"].notna(), rows["D_Name"].notna(), rows["I_Name"].notna()
@@ -336,9 +372,9 @@ def _classify_rows(rows: pd.DataFrame, c: pd.DataFrame, months: list) -> pd.Data
             t.append("Not in Feedback (retained)")
         if moved:
             t.append("Phase Transfer")
-        types.append("; ".join(dict.fromkeys(t)))
         if r.CodeCorrection and "Project Code Correction" not in t:
             t.append("Project Code Correction")
+        types.append("; ".join(dict.fromkeys(t)))
         concern.append(bool(r.Changed_Cells) or (r.D_Exists and not r.P_Exists and r.Final_Total >= TOL)
                        or (bool(r.CodeCorrection) and r.D_Exists) or (bool(r.RequestedPhase) and r.D_Exists))
     rows["Concern_Types"], rows["Concern"] = types, concern
@@ -347,14 +383,15 @@ def _classify_rows(rows: pd.DataFrame, c: pd.DataFrame, months: list) -> pd.Data
                                     ((r.DeptCode, r.ProjectBase) not in base_in_dept) for r in rows.itertuples()]
     no_mh = (rows["Gross_Increase"] - rows["Gross_Reduction"]).abs() < TOL
     rows["Implementation_Status"] = np.select(
-        [rows["Concern"] & no_mh,
+        [rows["Concern"] & no_mh & rows["PhaseImplemented"].astype(bool),
+         rows["Concern"] & no_mh,
          rows["Concern"] & ~rows["I_Exists"],
          rows["Concern"] & (rows["Impl_Ratio"] >= 0.95),
          rows["Concern"] & (rows["Impl_Ratio"] >= 0.05),
          rows["Concern"],
          ~rows["Concern"] & (rows["Unrequested_Gross"] >= TOL) & rows["I_Exists"] & ~rows["P_Exists"] & ~rows["D_Exists"],
          ~rows["Concern"] & (rows["Unrequested_Gross"] >= TOL)],
-        ["Code or phase change - confirm in Primavera", "Not implemented (row absent after implementation)",
+        ["Implemented", "Code or phase change - confirm in Primavera", "Not implemented (row absent after implementation)",
          "Implemented", "Partially implemented",
          "Not implemented", "Added by Planning without comment", "Planner change without comment"], "No comment / no change")
     rows["Transfer_MH"] = [tset[(r.DeptCode, r.ProjectBase)].Transfer_MH if (r.DeptCode, r.ProjectBase) in tset and abs(r.Net_Change) >= TOL else 0.0

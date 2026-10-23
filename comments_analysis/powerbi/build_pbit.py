@@ -37,8 +37,9 @@ TABLES = {
         ("Unrequested Change MH", N), ("Requested Phase", T), ("Code Correction", T), ("Months Changed", T),
         ("Blank Not Applied MH", N), ("Feedback File", T), ("Feedback Row", I), ("Brief Categories", T),
         ("Department Remark", T), ("Blank Retained MH", N), ("Bridge New Work MH", N), ("Bridge Increase MH", N),
-        ("Bridge Extension MH", N), ("Bridge Reduction MH", N), ("Bridge Removed MH", N), ("Master Flag", T)],
-        hidden=["RowKey", "CycleRowKey"]),
+        ("Bridge Extension MH", N), ("Bridge Reduction MH", N), ("Bridge Removed MH", N), ("Master Flag", T),
+        ("Project Severity", T), ("Project Severity Points", I), ("Project Severity Order", I)],
+        hidden=["RowKey", "CycleRowKey", "Project Severity Order"], sort=[("Project Severity", "Project Severity Order")]),
     "FactCellChanges": dict(csv="FactCellChanges.csv", cols=[
         ("Cycle", T), ("RowKey", T), ("CycleRowKey", T), ("DeptCode", I), ("ProjectCode", T), ("Month", D),
         ("Cell Planning MH", N), ("Discipline Value", N), ("Cell Discipline MH", N), ("Change MH", N), ("Cell Implemented MH", N),
@@ -46,16 +47,19 @@ TABLES = {
     "BridgeConcernType": dict(csv="BridgeConcernType.csv", cols=[
         ("Cycle", T), ("RowKey", T), ("CycleRowKey", T), ("ConcernType", T), ("Brief Category", T)],
         hidden=["RowKey", "CycleRowKey", "Cycle"]),
+    # names and labels only: headcount, capacity and feedback status differ per cycle and live in FactDeptCycle
     "DimDepartment": dict(csv="DimDepartment.csv", cols=[
-        ("DeptCode", I), ("Department", T), ("Division", I), ("Service", T), ("Dept Label", T), ("Managers", I),
-        ("LoanTo_Unpaid", I), ("Permanent", I), ("Temporary", I), ("Total", I), ("Effective_Heads", I),
-        ("Capacity_MH_per_Month", N), ("Feedback Status", T), ("Feedback Processed", T), ("Sent To Dept", D),
-        ("Comments Received", D), ("As Of", D)], key="DeptCode", latest="As Of"),
+        ("DeptCode", I), ("Department", T), ("Division", I), ("Service", T), ("Dept Label", T), ("As Of", D)],
+        key="DeptCode", latest="As Of", hidden=["As Of"]),
+    "FactDeptCycle": dict(csv="DimDepartment.csv", cols=[
+        ("Cycle", T), ("DeptCode", I), ("Managers", I), ("LoanTo_Unpaid", I), ("Permanent", I), ("Temporary", I), ("Total", I),
+        ("Effective_Heads", I), ("Capacity_MH_per_Month", N), ("Feedback Status", T), ("Feedback Processed", T),
+        ("Sent To Dept", D), ("Comments Received", D)], hidden=["Cycle"]),
+    # master attributes only: a project's severity differs per cycle and is carried on FactCommentItems
     "DimProject": dict(csv="DimProject.csv", cols=[
         ("ProjectCode", T), ("Project Name", T), ("Base Code", T), ("Client", T), ("Master Name", T),
-        ("Master Client", T), ("Master Category", T), ("Master Flag", T), ("Title Variants", T), ("Project Label", T),
-        ("Severity", T), ("Severity Points", I), ("Depts Concerned", I), ("Departments Raising", T),
-        ("Severity Order", I)], key="ProjectCode", sort=[("Severity", "Severity Order")]),
+        ("Master Client", T), ("Master Category", T), ("Master Flag", T), ("Title Variants", T), ("Project Label", T)],
+        key="ProjectCode"),
     "DimCategory": dict(csv="DimCategory.csv", cols=[
         ("Category", T), ("Category Order", I), ("Parent Category", T), ("Firm Workload", T), ("Color", T)],
         key="Category", sort=[("Category", "Category Order")]),
@@ -91,9 +95,13 @@ RELATIONSHIPS = [
     ("FactCellChanges", "CycleRowKey", "FactCommentItems", "CycleRowKey", False),
     ("FactCellChanges", "Month", "DimDate", "Month", False),
     ("BridgeConcernType", "CycleRowKey", "FactCommentItems", "CycleRowKey", True),
+    ("FactDeptCycle", "DeptCode", "DimDepartment", "DeptCode", False),
+    ("FactDeptCycle", "Cycle", "DimCycle", "Cycle", False),
     ("DataQuality", "Cycle", "DimCycle", "Cycle", False),
     ("FileInventory", "Cycle", "DimCycle", "Cycle", False),
+    ("FileInventory", "Dept", "DimDepartment", "DeptCode", False),
     ("PossibleTransfers", "Cycle", "DimCycle", "Cycle", False),
+    ("PossibleTransfers", "Dept", "DimDepartment", "DeptCode", False),
 ]
 
 FN_LOAD_CSV = """(fileName as text, columnTypes as list) as table =>
@@ -101,11 +109,17 @@ let
     Names    = List.Transform(columnTypes, each _{0}),
     Files    = Folder.Files(OutputRoot),
     Picked   = Table.SelectRows(Files, each [Name] = fileName),
-    Parsed   = List.Transform(Picked[Content], each
+    WithData = Table.AddColumn(Picked, "Data", each
                    Table.TransformColumnNames(        // drop a byte-order mark left on the first header
-                       Table.PromoteHeaders(Csv.Document(_, [Delimiter = ",", Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+                       Table.PromoteHeaders(Csv.Document([Content], [Delimiter = ",", Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
                                             [PromoteAllScalars = true]),
                        each Text.Replace(_, "#(FEFF)", ""))),
+    // the same cycle run twice under OutputRoot: keep only the newest file per cycle (files without a Cycle column are kept)
+    Keyed    = Table.AddColumn(WithData, "CycleKey", each
+                   if Table.HasColumns([Data], "Cycle") and not Table.IsEmpty([Data]) then Text.From([Data]{0}[Cycle])
+                   else [Folder Path] & [Name]),
+    Newest   = Table.Group(Keyed, {"CycleKey"}, {{"Data", each Table.Sort(_, {{"Date modified", Order.Descending}}){0}[Data]}}),
+    Parsed   = Newest[Data],
     Combined = if List.IsEmpty(Parsed) then #table(Names, {}) else Table.Combine(Parsed),
     // columns added in later cycles are null in older ones; unknown columns are dropped
     Complete = List.Accumulate(Names, Combined, (t, n) => if Table.HasColumns(t, n) then t else Table.AddColumn(t, n, each null)),
@@ -438,16 +452,20 @@ def build_report(logo: str | None) -> Report:
           title="Utilisation by month - discipline-adjusted MH / capacity")
 
     R.page("Project Concerns")
-    R.slicer(5, 62, 180, 160, C("DimProject", "Severity"), mode="Basic", title="Severity")
+    R.slicer(5, 62, 180, 160, C("FactCommentItems", "Project Severity"), mode="Basic", title="Severity")
     R.slicer(5, 227, 180, 300, C("BridgeConcernType", "Brief Category"), mode="Basic", title="Concern category")
     R.slicer(5, 532, 180, 183, C("DimProject", "Master Flag"), mode="Basic", title="Project master check")
+    # every figure on this page comes from the comment items, so the severity and concern-category slicers narrow it
     R.add("tableEx", 190, 62, 1085, 400, {"Values": [
-        C("DimProject", "Project Label"), C("DimProject", "Severity"), C("DimProject", "Severity Points"),
-        C("DimProject", "Depts Concerned"), C("DimProject", "Departments Raising"), M("Planning MH"),
-        M("Discipline MH"), M("Disc vs Plan MH"), M("Implementation Rate"), C("DimProject", "Master Flag")]},
-          title="Projects ranked by severity", order_by=(C("DimProject", "Severity Points"), True))
+        C("DimProject", "Project Label"), M("Severity Level"), M("Project Points"), M("Departments With Concern"),
+        M("Raised By"), M("Items Planning MH"), M("Items Discipline MH"), M("Items Net MH"), M("Implementation Rate"),
+        C("DimProject", "Master Flag")]},
+          title="Projects ranked by severity", order_by=(M("Project Points"), True),
+          names={M("Departments With Concern"): "Depts raising", M("Items Planning MH"): "Planning MH",
+                 M("Items Discipline MH"): "Discipline MH", M("Items Net MH"): "Disc vs Plan MH"})
     R.add("pivotTable", 190, 467, 1085, 248, {"Rows": [C("DimProject", "Project Label")], "Columns": [dept],
-                                              "Values": [M("Disc vs Plan MH")]}, title="Deviation by project and department (MH)")
+                                              "Values": [M("Items Net MH")]}, title="Deviation by project and department (MH)",
+          names={M("Items Net MH"): "Disc vs Plan MH"})
 
     R.page("Added Projects")
     R.card(5, 62, 200, 72, "New Project MH", "New allocations MH")
@@ -463,13 +481,14 @@ def build_report(logo: str | None) -> Report:
 
     R.page("Implementation Tracking")
     R.add("barChart", 5, 62, 620, 653, {"Category": [dept], "Y": [M("Items Implemented"), M("Items Partially Implemented"),
-                                                                  M("Items Not Implemented")]},
+                                                                  M("Items Not Implemented"), M("Items Code or Phase Change")]},
           title="Concern items by implementation status")
     R.card(630, 62, 210, 72, "Implementation Rate", "Implementation rate")
     R.card(845, 62, 210, 72, "Implemented of Request MH", "Implemented of request MH")
     R.card(1060, 62, 215, 72, "Planner Change Without Comment MH", "Changed without comment MH")
     R.add("tableEx", 630, 140, 645, 575, {"Values": [
-        C("FactCommentItems", "DeptCode"), C("FactCommentItems", "ProjectCode"), C("FactCommentItems", "Activity"),
+        C("FactCommentItems", "DeptCode"), C("FactCommentItems", "SubDept"), C("FactCommentItems", "Category"),
+        C("FactCommentItems", "ProjectCode"), C("FactCommentItems", "Activity"),
         S("FactCommentItems", "Item Planning MH"), S("FactCommentItems", "Item Discipline MH"),
         S("FactCommentItems", "Item Implemented MH"), C("FactCommentItems", "Concern Types"),
         C("FactCommentItems", "Implementation Status")]},
@@ -494,7 +513,8 @@ def build_report(logo: str | None) -> Report:
     R.page("Cell Detail")
     R.slicer(5, 62, 260, 653, C("FactCommentItems", "ProjectCode"), mode="Basic", title="Project")
     R.add("tableEx", 270, 62, 1005, 653, {"Values": [
-        C("FactCellChanges", "DeptCode"), C("FactCellChanges", "ProjectCode"), C("FactCellChanges", "Month"),
+        C("FactCellChanges", "DeptCode"), C("FactCommentItems", "SubDept"), C("FactCommentItems", "Category"),
+        C("FactCellChanges", "ProjectCode"), C("FactCellChanges", "Month"),
         S("FactCellChanges", "Cell Planning MH"), S("FactCellChanges", "Discipline Value"), S("FactCellChanges", "Cell Discipline MH"),
         S("FactCellChanges", "Change MH"), S("FactCellChanges", "Cell Implemented MH"), C("FactCellChanges", "Cell Status"),
         C("FactCellChanges", "Blank Note")]}, title="Month-level changes and retained blanks")

@@ -192,7 +192,15 @@ def load_master(path: str | Path | None) -> pd.DataFrame:
 def attach_master(df: pd.DataFrame, code_col: str, master: pd.DataFrame) -> pd.DataFrame:
     """Add master name/client and a flag: not in master, internal/overhead account, or no code."""
     out = df.copy()
-    base = out[code_col].astype(str).str.split("-").str[0]
+    if master is None or master.empty:
+        # no project master given: nothing can be checked, so nothing is flagged (only rows without any code)
+        for c in ("Master_Name", "Master_Client", "Master_Category"):
+            out[c] = np.nan
+        out["Master_Flag"] = np.where(out[code_col].astype(str).str.startswith("UNCODED"), "No project code", "")
+        return out
+    # the full code when the master lists it (5485300-2), otherwise its base project (5248200 for 5248200-1)
+    full = out[code_col].astype(str)
+    base = full.where(full.isin(set(master["Code"])), full.str.split("-").str[0])
     out = out.merge(master.rename(columns={"Code": "_base"}), left_on=base, right_on="_base", how="left").drop(columns="_base")
     if "key_0" in out.columns:
         out = out.drop(columns="key_0")
@@ -363,7 +371,9 @@ def possible_transfers(rows: pd.DataFrame) -> pd.DataFrame:
             for u in ups.itertuples():
                 if u.Index in used or u.ProjectFull == d.ProjectFull:
                     continue
-                fam = len(d.ProjectBase) >= 7 and d.ProjectBase[:5] == u.ProjectBase[:5]
+                # a project family needs real codes on both sides (uncoded rows carry a surrogate key)
+                fam = (len(d.ProjectBase) >= 7 and str(d.ProjectBase).isdigit() and str(u.ProjectBase).isdigit()
+                       and d.ProjectBase[:5] == u.ProjectBase[:5])
                 sim = _sim(d.Name, u.Name)
                 score = (1 if fam else 0) + sim
                 if (fam or sim >= 0.6) and (best is None or score > best[0]):

@@ -78,6 +78,11 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
         "Bridge Increase MH": r["Bridge_Increase"], "Bridge Extension MH": r["Bridge_Extension"],
         "Bridge Reduction MH": r["Bridge_Reduction"], "Bridge Removed MH": r["Bridge_Removed"],
         "Master Flag": r["Master_Flag"] if "Master_Flag" in r else ""})
+    # the project's severity in this cycle, on every item, so a report over several cycles rates each cycle on its own
+    sev_level = r["ProjectFull"].map(sev["Severity"]).fillna("No Concern")
+    items["Project Severity"] = sev_level
+    items["Project Severity Points"] = r["ProjectFull"].map(sev["Severity_Points"]).fillna(0)
+    items["Project Severity Order"] = sev_level.map({"Critical": 1, "High": 2, "Medium": 3, "Low": 4, "No Concern": 5})
     bridge = (items[["Cycle", "RowKey", "Concern Types"]].assign(ConcernType=items["Concern Types"].str.split("; "))
               .explode("ConcernType").query("ConcernType != ''").dropna()[["Cycle", "RowKey", "ConcernType"]])
     bridge["Brief Category"] = bridge["ConcernType"].map(BRIEF_MAP).fillna("Other")
@@ -142,19 +147,22 @@ def export_powerbi(folder: Path, *, df, cells, rows, ps, cap, issues, cycle: str
     for t in (items, bridge, cell_changes):
         t.insert(2, "CycleRowKey", t["Cycle"] + "|" + t["RowKey"])
     # whole numbers stay whole in the CSV (no "62.0"), so Power Query's Int64 columns load cleanly
-    for t, cols in ((items, ["Feedback Row"]), (dim_proj, ["Severity Points", "Depts Concerned", "Severity Order"]),
+    for t, cols in ((items, ["Feedback Row", "Project Severity Points", "Project Severity Order"]), (dim_proj, ["Severity Points", "Depts Concerned", "Severity Order"]),
                     (dim_dept, ["Managers", "LoanTo_Unpaid", "Permanent", "Temporary", "Total", "Effective_Heads"])):
         for col in cols:
             if col in t:
                 t[col] = pd.to_numeric(t[col], errors="coerce").round().astype("Int64")
     dim_dept.insert(len(dim_dept.columns), "As Of", dt.date.today())
+    dim_dept.insert(len(dim_dept.columns), "Cycle", cycle)   # headcount and feedback status belong to this cycle
     tables = {"FactWorkload": fact, "FactCommentItems": items, "FactCellChanges": cell_changes, "BridgeConcernType": bridge,
               "DimDepartment": dim_dept, "DimProject": dim_proj, "DimCategory": dim_cat, "DimScenario": dim_scen,
               "DimDate": dim_date, "DataQuality": dq}
     if inventory is not None:
         tables["FileInventory"] = inventory.assign(Cycle=cycle)
-    if possible is not None and len(possible):
-        tables["PossibleTransfers"] = possible.assign(Cycle=cycle)
+    # always written (headers only when there is none), so a re-run never leaves the previous run's transfers behind
+    pt_cols = ["Dept", "Reduced Project", "Reduced Phase", "Reduced Title", "Reduction MH", "Added Project", "Added Phase",
+               "Added Title", "Added MH", "Match Basis", "Possible Offset MH", "Net of the Pair MH"]
+    tables["PossibleTransfers"] = (possible if possible is not None and len(possible) else pd.DataFrame(columns=pt_cols)).assign(Cycle=cycle)
     for name, t in tables.items():
         t.to_csv(folder / f"{name}.csv", index=False, encoding="utf-8-sig", date_format="%Y-%m-%d")
     wb = Workbook()

@@ -32,6 +32,14 @@ THIN = Side(style="thin", color=GRID)
 BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 
+def _cf(ws, ref: str, rule):
+    """Conditional formatting, skipped for an empty table (a range like R5:R4 when a sheet has no rows this cycle)."""
+    from openpyxl.utils.cell import range_boundaries
+    c1, r1, c2, r2 = range_boundaries(ref)
+    if r2 >= r1 and c2 >= c1:
+        ws.conditional_formatting.add(ref, rule)
+
+
 def _f(bold=False, color=INK, size=9, italic=False):
     return Font(name=FONT, bold=bold, color=color, size=size, italic=italic)
 
@@ -179,7 +187,7 @@ def _capacity(wb, cap):
 
 
 # ----------------------------------------------------------------------------- summary sheets
-def _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections=None):
+def _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections=None, n_months=24, concern_projects=None):
     ws = wb["Department Ranking"]
     _title(ws, "Department Ranking - Planning Input vs Discipline Comment vs After Implementation",
            "Sorted by absolute net deviation. MH = man-hours over the 24-month window. Formulas read 'Row Register', "
@@ -231,14 +239,15 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections=None):
         ws.cell(i, 23, f"=SUMIFS({rng('Unrequested_Gross')},{rng('DeptCode')},{crit})")
         ws.cell(i, 24, f"=IFERROR(INDEX(Capacity!$H$5:$H${cap_last},MATCH($A{i},Capacity!$A$5:$A${cap_last},0)),0)")
         ws.cell(i, 25, f"=IFERROR(INDEX(Capacity!$I$5:$I${cap_last},MATCH($A{i},Capacity!$A$5:$A${cap_last},0)),0)")
-        ws.cell(i, 26, f'=IF(Y{i}=0,"-",D{i}/24/Y{i})')
-        ws.cell(i, 27, f'=IF(Y{i}=0,"-",E{i}/24/Y{i})')
-        ws.cell(i, 28, f'=IF(Y{i}=0,"-",F{i}/24/Y{i})')
+        ws.cell(i, 26, f'=IF(Y{i}=0,"-",D{i}/{n_months}/Y{i})')
+        ws.cell(i, 27, f'=IF(Y{i}=0,"-",E{i}/{n_months}/Y{i})')
+        ws.cell(i, 28, f'=IF(Y{i}=0,"-",F{i}/{n_months}/Y{i})')
         firm = "+".join(f'SUMIFS({M}$E$5:$E${md_last},{M}$A$5:$A${md_last},$A{i},{M}$B$5:$B${md_last},"{c}")'
                         for c in FIRM_CATEGORIES)
-        ws.cell(i, 29, f'=IF(Y{i}=0,"-",({firm})/24/Y{i})')
+        ws.cell(i, 29, f'=IF(Y{i}=0,"-",({firm})/{n_months}/Y{i})')
         ws.cell(i, 30, f'=IF(M{i}=0,"-",RANK(M{i},$M${first}:$M${last}))')
-        ws.cell(i, 31, f'=IF(I{i}=0,"-",RANK(J{i},$J${first}:$J${last}))')
+        # rank only among departments that changed something, so a net reduction is not ranked below the unchanged ones
+        ws.cell(i, 31, f'=IF(I{i}=0,"-",COUNTIFS($J${first}:$J${last},">"&J{i},$I${first}:$I${last},"<>0")+1)')
         ws.cell(i, 32, int(rec.Firm_Overload_Months_Final))
         ws.cell(i, 33, int(rec.Overload_Months_Final))
         ws.cell(i, 34, f"=SUMIFS({rng('BlankRetained_MH')},{rng('DeptCode')},{crit})")
@@ -253,15 +262,17 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections=None):
     t = last + 1
     ws.cell(t, 1, "TOTAL")
     ws.cell(t, 2, "All departments")
-    for j in (4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25) + tuple(range(34, ncol + 1)):
+    for j in (4, 5, 6, 7, 8, 9, 13, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25) + tuple(range(34, ncol + 1)):
         ws.cell(t, j, f"=SUM({L(j)}{first}:{L(j)}{last})")
+    # a project raised by several departments counts once in the company total
+    ws.cell(t, 14, int(concern_projects) if concern_projects is not None else f"=SUM({L(14)}{first}:{L(14)}{last})")
     ws.cell(t, 10, f"=IF(D{t}=0,0,I{t}/D{t})")
     ws.cell(t, 22, f'=IF(T{t}=0,"-",U{t}/T{t})')
-    ws.cell(t, 26, f'=IF(Y{t}=0,"-",D{t}/24/Y{t})')
-    ws.cell(t, 27, f'=IF(Y{t}=0,"-",E{t}/24/Y{t})')
-    ws.cell(t, 28, f'=IF(Y{t}=0,"-",F{t}/24/Y{t})')
+    ws.cell(t, 26, f'=IF(Y{t}=0,"-",D{t}/{n_months}/Y{t})')
+    ws.cell(t, 27, f'=IF(Y{t}=0,"-",E{t}/{n_months}/Y{t})')
+    ws.cell(t, 28, f'=IF(Y{t}=0,"-",F{t}/{n_months}/Y{t})')
     firm_all = "+".join(f'SUMIFS({M}$E$5:$E${md_last},{M}$B$5:$B${md_last},"{c}")' for c in FIRM_CATEGORIES)
-    ws.cell(t, 29, f'=IF(Y{t}=0,"-",({firm_all})/24/Y{t})')
+    ws.cell(t, 29, f'=IF(Y{t}=0,"-",({firm_all})/{n_months}/Y{t})')
     for j in range(1, ncol + 1):
         c = ws.cell(t, j)
         c.font, c.border, c.fill = _f(bold=True), BOX, _fill("DDEBF7")
@@ -273,9 +284,9 @@ def _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections=None):
         ws.column_dimensions[L(j)].width = widths.get(j, 13)
     ws.freeze_panes = "D5"
     lim = float(max(1.0, d["Net_Deviation"].abs().max()))
-    ws.conditional_formatting.add(f"I{first}:I{last}", _diverging(lim))
+    _cf(ws, f"I{first}:I{last}", _diverging(lim))
     for col in ("Z", "AA", "AB", "AC"):
-        ws.conditional_formatting.add(f"{col}{first}:{col}{last}", CellIsRule(operator="greaterThan", formula=["1"],
+        _cf(ws, f"{col}{first}:{col}{last}", CellIsRule(operator="greaterThan", formula=["1"],
                                       font=Font(name=FONT, bold=True, color="C00000")))
     _note(ws, "C4", "Red italic = no comment file was available for this department, so its original is used with no change "
                     "(status from the workflow tracker where provided).")
@@ -363,9 +374,9 @@ def _project_ranking(wb, ps, rr_last):
             c.font, c.border = _f(), BOX
             c.number_format = PCT if j in (15, 22) else (MH if j in (9, 10, 11, 12, 13, 14, 24) else "General")
     for sev, col in SEV_FILL.items():
-        ws.conditional_formatting.add(f"E{first}:E{last}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(col),
+        _cf(ws, f"E{first}:E{last}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(col),
                                       font=Font(name=FONT, bold=True, color="FFFFFF" if sev == "Critical" else INK)))
-    ws.conditional_formatting.add(f"AA{first}:AA{last}", FormulaRule(formula=[f'LEFT(AA{first},8)="Internal"'],
+    _cf(ws, f"AA{first}:AA{last}", FormulaRule(formula=[f'LEFT(AA{first},8)="Internal"'],
                                   font=Font(name=FONT, bold=True, color="C00000")))
     widths = {1: 6, 2: 12, 3: 10, 4: 48, 5: 10, 6: 9, 7: 9, 8: 30, 17: 18, 18: 26, 19: 46, 25: 40, 26: 12, 27: 30, 28: 50}
     for j in range(1, ncol + 1):
@@ -459,7 +470,7 @@ def _monthly_impact(wb, months, md_last, cap_last, dev_lim):
         row += 1
     ws.cell(cap_row, tot_col, f"={L(tot_col - 1)}{cap_row}*24")
     util_rows = (cap_row + 1, cap_row + 4)
-    ws.conditional_formatting.add(f"C{util_rows[0]}:{L(tot_col - 1)}{util_rows[1]}",
+    _cf(ws, f"C{util_rows[0]}:{L(tot_col - 1)}{util_rows[1]}",
                                   CellIsRule(operator="greaterThan", formula=["1"], font=Font(name=FONT, bold=True, color="C00000")))
     # chart: company totals vs capacity (one axis: MH)
     ch = LineChart()
@@ -514,12 +525,12 @@ def _monthly_impact(wb, months, md_last, cap_last, dev_lim):
             row += 1
         area = f"C{top}:{L(tot_col - 1)}{row - 1}"
         if scale == "div":
-            ws.conditional_formatting.add(area, _diverging(dev_lim))
+            _cf(ws, area, _diverging(dev_lim))
         else:
-            ws.conditional_formatting.add(area, ColorScaleRule(start_type="num", start_value=0, start_color="FFFFFF",
+            _cf(ws, area, ColorScaleRule(start_type="num", start_value=0, start_color="FFFFFF",
                                                                mid_type="num", mid_value=1, mid_color="FBD3BF",
                                                                end_type="num", end_value=2, end_color="D95926"))
-            ws.conditional_formatting.add(area, CellIsRule(operator="greaterThan", formula=["1"], font=Font(name=FONT, bold=True, color=INK)))
+            _cf(ws, area, CellIsRule(operator="greaterThan", formula=["1"], font=Font(name=FONT, bold=True, color=INK)))
         row += 2
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 34
@@ -560,7 +571,7 @@ def _deviation_register(wb, rows, ps):
     for i in range(first, last + 1):
         ws.cell(i, 14, f'=IF(H{i}<=0,"New",M{i}/H{i})').number_format = PCT
     for sevname, col in SEV_FILL.items():
-        ws.conditional_formatting.add(f"R{first}:R{last}", CellIsRule(operator="equal", formula=[f'"{sevname}"'], fill=_fill(col),
+        _cf(ws, f"R{first}:R{last}", CellIsRule(operator="equal", formula=[f'"{sevname}"'], fill=_fill(col),
                                       font=Font(name=FONT, color="FFFFFF" if sevname == "Critical" else INK)))
     ws.freeze_panes = "H5"
     return len(out)
@@ -584,7 +595,7 @@ def _cell_changes(wb, cells, rows):
     fm = {"Month": MON, "Planning Input": MH, "Discipline Value": MH, "Final (rule applied)": MH, "Deviation": MH,
           "After Implementation": MH, "Implementation Gap (After - Final)": MH}
     first, last = _write_table(ws, out, 4, fmts=fm, widths={"Activity": 44, "Blank Note": 60, "Cell Status": 22})
-    ws.conditional_formatting.add(f"H{first}:H{last}", FormulaRule(formula=[f'AND(ISNUMBER(H{first}),H{first}<>G{first})'],
+    _cf(ws, f"H{first}:H{last}", FormulaRule(formula=[f'AND(ISNUMBER(H{first}),H{first}<>G{first})'],
                                   fill=_fill("FCE4D6"), font=Font(name=FONT, color="C55A11", bold=True)))
     ws.freeze_panes = "F5"
     return len(out)
@@ -705,7 +716,8 @@ def _implementation(wb, rows, rr_last):
     _title(ws, "Implementation Tracking - were discipline comments implemented by Planning?",
            "Compares each requested change with the after-implementation extract. Counts and MH are formulas over 'Row Register'.")
     statuses = ["Implemented", "Partially implemented", "Not implemented", "Not implemented (row absent after implementation)",
-                "Planner change without comment", "Added by Planning without comment"]
+                "Code or phase change - confirm in Primavera", "Planner change without comment", "Added by Planning without comment"]
+    k = 4 + len(statuses)   # first column after the status counts
     heads = ["Dept", "Department", "Concern Items"] + statuses + ["Requested Change MH", "Implemented of Request MH",
                                                                   "Implementation Rate", "Planner Change w/o Comment MH"]
     _header(ws, 4, 1, heads, height=48)
@@ -719,28 +731,28 @@ def _implementation(wb, rows, rr_last):
         ws.cell(i, 3, f'=COUNTIFS({rng("DeptCode")},$A{i},{rng("Concern")},"Yes")')
         for j, st in enumerate(statuses, start=4):
             ws.cell(i, j, f'=COUNTIFS({rng("DeptCode")},$A{i},{rng("Implementation_Status")},"{st}")')
-        ws.cell(i, 10, f'=SUMIFS({rng("Gross_Change")},{rng("DeptCode")},$A{i},{rng("Concern")},"Yes")')
-        ws.cell(i, 11, f'=SUMIFS({rng("Implemented_Request_MH")},{rng("DeptCode")},$A{i})')
-        ws.cell(i, 12, f'=IF(J{i}=0,"-",K{i}/J{i})')
-        ws.cell(i, 13, f'=SUMIFS({rng("Unrequested_Gross")},{rng("DeptCode")},$A{i})')
-        for j in range(1, 14):
+        ws.cell(i, k, f'=SUMIFS({rng("Gross_Change")},{rng("DeptCode")},$A{i},{rng("Concern")},"Yes")')
+        ws.cell(i, k + 1, f'=SUMIFS({rng("Implemented_Request_MH")},{rng("DeptCode")},$A{i})')
+        ws.cell(i, k + 2, f'=IF({L(k)}{i}=0,"-",{L(k + 1)}{i}/{L(k)}{i})')
+        ws.cell(i, k + 3, f'=SUMIFS({rng("Unrequested_Gross")},{rng("DeptCode")},$A{i})')
+        for j in range(1, k + 4):
             c = ws.cell(i, j)
             c.font, c.border = _f(), BOX
-            c.number_format = PCT if j == 12 else (MH if j in (10, 11, 13) else "General")
+            c.number_format = PCT if j == k + 2 else (MH if j in (k, k + 1, k + 3) else "General")
     last = first + len(depts) - 1
     t = last + 1
     ws.cell(t, 1, "TOTAL")
-    for j in range(3, 12):
+    for j in range(3, k + 2):
         ws.cell(t, j, f"=SUM({L(j)}{first}:{L(j)}{last})")
-    ws.cell(t, 12, f'=IF(J{t}=0,"-",K{t}/J{t})')
-    ws.cell(t, 13, f"=SUM(M{first}:M{last})")
-    for j in range(1, 14):
+    ws.cell(t, k + 2, f'=IF({L(k)}{t}=0,"-",{L(k + 1)}{t}/{L(k)}{t})')
+    ws.cell(t, k + 3, f"=SUM({L(k + 3)}{first}:{L(k + 3)}{last})")
+    for j in range(1, k + 4):
         c = ws.cell(t, j)
         c.font, c.border, c.fill = _f(bold=True), BOX, _fill("DDEBF7")
-        c.number_format = PCT if j == 12 else (MH if j in (10, 11, 13) else "General")
-    ws.conditional_formatting.add(f"L{first}:L{last}", ColorScaleRule(start_type="num", start_value=0, start_color="FBD3BF",
+        c.number_format = PCT if j == k + 2 else (MH if j in (k, k + 1, k + 3) else "General")
+    _cf(ws, f"{L(k + 2)}{first}:{L(k + 2)}{last}", ColorScaleRule(start_type="num", start_value=0, start_color="FBD3BF",
                                   end_type="num", end_value=1, end_color="FFFFFF"))
-    for j, w in enumerate([7, 30, 10, 13, 13, 13, 16, 15, 15, 14, 14, 13, 15], start=1):
+    for j, w in enumerate([7, 30, 10, 13, 13, 13, 16, 15, 15, 15, 14, 14, 13, 15], start=1):
         ws.column_dimensions[L(j)].width = w
     row = t + 3
     ws.cell(row, 1, "Largest requests not implemented (top 40 by requested MH)").font = Font(name=FONT, bold=True, size=11, color=NAVY)
@@ -845,7 +857,7 @@ def _method(wb, meta):
         ("Formulas in feedback", "A row-total formula typed into a month cell (e.g. =SUM(C39:V39)) is ignored and the planning value "
                                  "kept; it is logged as a High data-quality item."),
         ("Unresolved blanks", f"Departments without -c files read directly come from the Copilot table, which stored blank feedback as 0 "
-                              f"({n_cop} departments' feedback this cycle). Those zeros are treated as blank (baseline retained) and "
+                              f"({meta.get('copilot_feedback_text', f'{n_cop} departments this cycle')}). Those zeros are treated as blank (baseline retained) and "
                               f"listed as 'Blank/zero not applied'. In the {n_dir} feedback files read directly, a blank cell the "
                               "department marked red/highlighted is listed the same way."),
         ("Feedback status", "From the files and the workflow tracker: 'Feedback received - changes / no MH change' = -c file "
@@ -855,8 +867,9 @@ def _method(wb, meta):
         ("Project master check", "Codes are checked against the ENPPI project master: not in master (new or proposal code), "
                                  "no project code, or an internal / overhead account (e.g. 8700100 Business Development) used "
                                  "for project work - a placeholder until a project code is assigned."),
-        ("Implementation", "Per changed cell: Implemented if After = Final; Not implemented if After = Planning; otherwise Partially "
-                           "implemented (share = movement toward the request). Row rate is weighted by requested MH: >= 95% Implemented, "
+        ("Implementation", "Per changed cell: Implemented if After = Final; Not implemented if After = Planning; Partially "
+                           "implemented if After moved toward the request (share = movement toward it, capped at the request); "
+                           "Implemented differently if After moved the other way. Row rate is weighted by requested MH: >= 95% Implemented, "
                            ">= 5% Partially implemented, else Not implemented. Code or phase changes without MH change are "
                            "'Code or phase change - confirm in Primavera'."),
         ("Severity points", "Gross change (Inc + |Red|): >=50k 6, >=20k 5, >=10k 4, >=5k 3, >=2k 2, >=500 1 | Net % of planning: "
@@ -868,10 +881,12 @@ def _method(wb, meta):
                                "Only -> Phase Transfer; New Project (code reused) -> New Project."),
         ("Capacity", f"Effective heads = ROUNDUP(Permanent x {PERMANENT_EFFECTIVENESS}) + Temporary; capacity = heads x "
                      f"{HOURS_PER_MAN_MONTH} MH/month (factors from the Forecast Comments PBIX). Managers and Loan-to/unpaid staff excluded. "
-                     "Headcount date of 'Table for Emails' is not stated in the file - confirm it matches this cycle."),
+                     "Headcount date of 'Table for Emails' is not stated in the file - confirm it matches this cycle. Headcount "
+                     "codes that roll up (1190 -> 1180, 2700 -> 2710, 5110-5160 -> 5100) are summed before ROUNDUP; the Forecast "
+                     "Comments PBIX rounds each code first, which gives 5100 two more heads (163 instead of 161)."),
         ("Firm workload", "Running + Internal / Unforeseen + Loan To + Under Signature (pipeline categories excluded)."),
-        ("Category rule", "Internal / Unforeseen = project 1100100 under Running; it remains part of Running totals "
-                          "(see the 'Running incl. Internal' memo rows on Monthly Workload Impact)."),
+        ("Category rule", "Internal / Unforeseen = project 1100100 under Running. It is reported as its own category; the "
+                          "'Running incl. Internal' memo rows on Monthly Workload Impact add it back to Running."),
         ("Limitations", meta["limitations"]),
     ]
     for i, (k, v) in enumerate(lines, start=3):
@@ -1003,7 +1018,7 @@ def _exec_summary(wb, dr_total, pr_first, pr_last, findings, actions, meta, rr_l
             c.font, c.border = _f(), BOX
             c.number_format = PCT if col in ("O", "V") else (MH if col in ("I", "J", "N", "K") else "General")
     for sev, colr in SEV_FILL.items():
-        ws.conditional_formatting.add(f"D{row + 2}:D{row + 11}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(colr),
+        _cf(ws, f"D{row + 2}:D{row + 11}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(colr),
                                       font=Font(name=FONT, color="FFFFFF" if sev == "Critical" else INK)))
     row += 14
     ws.cell(row, 1, "Top 10 projects by gross MH increase requested").font = Font(name=FONT, bold=True, size=11, color=NAVY)
@@ -1027,7 +1042,7 @@ def _exec_summary(wb, dr_total, pr_first, pr_last, findings, actions, meta, rr_l
             c.font, c.border = _f(), BOX
             c.number_format = MH if j in (6, 7, 8, 9) else "General"
     for sev, colr in SEV_FILL.items():
-        ws.conditional_formatting.add(f"D{row + 2}:D{row + 11}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(colr),
+        _cf(ws, f"D{row + 2}:D{row + 11}", CellIsRule(operator="equal", formula=[f'"{sev}"'], fill=_fill(colr),
                                       font=Font(name=FONT, color="FFFFFF" if sev == "Critical" else INK)))
     ws.merge_cells(start_row=row + 1, start_column=10, end_row=row + 1, end_column=12)
     for k in range(10):
@@ -1068,7 +1083,8 @@ def write_workbook(path, *, rows, cells, transfers, ds, ps, mdf, cap, chk, inven
     _, rr_last = _row_register(wb, rows)
     _, md_last = _monthly_data(wb, mdf)
     _, cap_last = _capacity(wb, cap)
-    _, _, dr_total = _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections)
+    _, _, dr_total = _dept_ranking(wb, ds, rr_last, md_last, cap_last, sections, n_months=cells["Month"].nunique(),
+                                   concern_projects=rows.loc[rows["Concern"], "ProjectFull"].nunique())
     pr_first, pr_last = _project_ranking(wb, ps, rr_last)
     months = sorted(cells["Month"].unique())
     dm = mdf.groupby(["DeptCode", "Month"]).sum(numeric_only=True)

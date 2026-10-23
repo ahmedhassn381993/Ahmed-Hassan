@@ -28,6 +28,16 @@ python engine/run_analysis.py --cycle "Q4 2026" \
 The run writes the analysis workbook plus `powerbi/*.csv`. Keep one sub-folder per cycle under `OutputRoot`.
 The report loads every cycle; the **Cycle** slicer on each page selects one.
 
+Each cycle keeps its own figures:
+
+* headcount, capacity and feedback status come from that cycle's run (table `FactDeptCycle`);
+* project severity is rated per cycle (on the comment items);
+* capacity counts the selected cycle's months only.
+
+If the same cycle is run twice under `OutputRoot` (for example after step 4.3 closes), the report uses the newest
+files of that cycle. The web application's **Power BI data (.zip)** has the same layout and can be unzipped under the
+same root.
+
 ## 2. Open the template (recommended)
 
 1. Double-click `Workload_Comments_Analysis.pbit`.
@@ -37,7 +47,7 @@ The report loads every cycle; the **Cycle** slicer on each page selects one.
 
 The template contains:
 
-* the data model: queries, 16 relationships, sort orders and the measures in `measures.dax`;
+* the data model: queries, 20 relationships, sort orders and the 94 measures in `measures.dax`;
 * the ENPPI theme;
 * nine pages built only from Power BI's standard visuals, so no custom-visual downloads are needed.
 

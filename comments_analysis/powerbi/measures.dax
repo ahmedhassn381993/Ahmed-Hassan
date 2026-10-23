@@ -55,12 +55,19 @@ Items Implemented = CALCULATE ( [Concern Items], FactCommentItems[Implementation
 Items Partially Implemented = CALCULATE ( [Concern Items], FactCommentItems[Implementation Status] = "Partially implemented" )
 Items Not Implemented =
     CALCULATE ( [Concern Items], LEFT ( FactCommentItems[Implementation Status], 15 ) = "Not implemented" )
+Items Code or Phase Change =
+    CALCULATE ( [Concern Items], FactCommentItems[Implementation Status] = "Code or phase change - confirm in Primavera" )
 Planner Change Without Comment MH = SUM ( FactCommentItems[Unrequested Change MH] )
 
-// [5 Capacity] - capacity is per month, so multiply by the months in context
-Months In Context = COUNTROWS ( VALUES ( DimDate[Month] ) )
-Capacity MH = SUM ( DimDepartment[Capacity_MH_per_Month] ) * [Months In Context]
-Effective Heads = SUM ( DimDepartment[Effective_Heads] )
+// [5 Capacity] - capacity is per month (FactDeptCycle holds each cycle's headcount), so multiply by the months of the
+// selected cycle in context; DimDate spans every loaded cycle, so its months are counted through the workload
+Months In Context =
+    CALCULATE (
+        DISTINCTCOUNT ( FactWorkload[Month] ),
+        REMOVEFILTERS ( DimDepartment ), REMOVEFILTERS ( DimCategory ), REMOVEFILTERS ( DimScenario ), REMOVEFILTERS ( DimProject )
+    )
+Capacity MH = SUM ( FactDeptCycle[Capacity_MH_per_Month] ) * [Months In Context]
+Effective Heads = SUM ( FactDeptCycle[Effective_Heads] )
 Utilisation Planning = DIVIDE ( [Planning MH], [Capacity MH] )
 Utilisation Discipline = DIVIDE ( [Discipline MH], [Capacity MH] )
 Utilisation Implemented = DIVIDE ( [Implemented MH], [Capacity MH] )
@@ -70,12 +77,22 @@ Overload Months (Discipline) =
     COUNTROWS ( FILTER ( VALUES ( DimDate[Month] ), [Utilisation Discipline] > 1 ) )
 Extra Heads Needed (Peak) =
     VAR PeakMH = MAXX ( VALUES ( DimDate[Month] ), [Discipline MH] )
-    VAR CapPerMonth = SUM ( DimDepartment[Capacity_MH_per_Month] )
+    VAR CapPerMonth = SUM ( FactDeptCycle[Capacity_MH_per_Month] )
     RETURN MAX ( 0, DIVIDE ( PeakMH - CapPerMonth, 150 ) )
 
-// [6 Severity]
-Critical Projects = CALCULATE ( [Projects with Concern], DimProject[Severity] = "Critical" )
-High Projects = CALCULATE ( [Projects with Concern], DimProject[Severity] = "High" )
+// [6 Severity] - rated per cycle on the comment items
+Critical Projects = CALCULATE ( [Projects with Concern], FactCommentItems[Project Severity] = "Critical" )
+High Projects = CALCULATE ( [Projects with Concern], FactCommentItems[Project Severity] = "High" )
+Severity Level = SELECTEDVALUE ( FactCommentItems[Project Severity] )
+Project Points = MAX ( FactCommentItems[Project Severity Points] )
+Raised By =
+    CONCATENATEX (
+        CALCULATETABLE ( VALUES ( FactCommentItems[DeptCode] ), FactCommentItems[Concern] = "Yes" ),
+        FactCommentItems[DeptCode], ", ", FactCommentItems[DeptCode], ASC
+    )
+Items Planning MH = SUM ( FactCommentItems[Item Planning MH] )
+Items Discipline MH = SUM ( FactCommentItems[Item Discipline MH] )
+Items Net MH = [Items Discipline MH] - [Items Planning MH]
 
 // [7 Labels and formatting helpers]
 Selected Department =
@@ -85,7 +102,7 @@ As Of Label = "Cycle " & SELECTEDVALUE ( DimCycle[Cycle], "(select one cycle)" )
 Deviation Colour =
     SWITCH ( TRUE (), [Disc vs Plan MH] > 0, "#EB6834", [Disc vs Plan MH] < 0, "#2A78D6", "#9E9E9E" )
 Severity Colour =
-    SWITCH ( SELECTEDVALUE ( DimProject[Severity] ),
+    SWITCH ( [Severity Level],
         "Critical", "#C00000", "High", "#F4B183", "Medium", "#FFE699", "Low", "#E2EFDA", "#F2F2F2" )
 Implementation Colour =
     SWITCH ( TRUE (), ISBLANK ( [Implementation Rate] ), "#F2F2F2",
@@ -132,7 +149,11 @@ Bridge Check MH =
         + [Removed Allocation MH]
         - [Net Change MH]
 Possible Transfer MH = SUM ( PossibleTransfers[Possible Offset MH] )
-Processed Planning MH = CALCULATE ( [Planning MH], DimDepartment[Feedback Processed] = "Yes" )
+Processed Planning MH =
+    CALCULATE (
+        [Planning MH],
+        TREATAS ( CALCULATETABLE ( VALUES ( FactDeptCycle[DeptCode] ), FactDeptCycle[Feedback Processed] = "Yes" ), DimDepartment[DeptCode] )
+    )
 Feedback Coverage % = DIVIDE ( [Processed Planning MH], [Planning MH] )
-Departments Processed = CALCULATE ( DISTINCTCOUNT ( DimDepartment[DeptCode] ), DimDepartment[Feedback Processed] = "Yes" )
+Departments Processed = CALCULATE ( DISTINCTCOUNT ( FactDeptCycle[DeptCode] ), FactDeptCycle[Feedback Processed] = "Yes" )
 Capacity Line = IF ( ISBLANK ( [Capacity MH] ), BLANK (), 1 )

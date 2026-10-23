@@ -1,6 +1,6 @@
 """Run the full discipline-comments analysis for one forecast cycle.
 
-Example (this cycle - originals not uploaded, so the validated Copilot table fills the gaps):
+Example (this cycle - originals not uploaded, so the corrected Copilot table fills the gaps):
     python run_analysis.py --cycle "Q3 2026" \
         --copilot-fact PowerBI_Workload_Model_3_Scenarios_2026-08-07_0106.xlsx \
         --comments COMMENTS --employees employee_count.xlsx \
@@ -67,7 +67,8 @@ def file_inventory(df: pd.DataFrame, fb: pd.DataFrame) -> pd.DataFrame:
                     action = f"Comments were received on {received:%d-%b-%y} but the -c file was not provided - upload it."
                 elif status.startswith("No comments received"):
                     action = ("No comments received (tracker) - chase the department for comments or a written 'no comments'."
-                              + (" Piping returns one consolidated 2400-c file, split by the engine into 2410-2450." if dept in PIPING else ""))
+                              + (" Piping may return one consolidated 2400-c file; the engine splits it into 2410-2450 by its "
+                                 "sub-department headers." if dept in PIPING else ""))
                 elif not f.loc[dept, "Feedback_Processed"]:
                     action = "Only the original is available - confirm 'no comments' with the department."
                 elif src.startswith("Copilot"):
@@ -139,11 +140,16 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
     not_recv = missing[missing["Feedback_Status"].str.startswith("No comments received")]
     not_prov = missing[missing["Feedback_Status"].str.contains("file not provided")]
     other = missing[~missing.index.isin(not_recv.index.union(not_prov.index))]
+    no_file = other[other["Feedback_Status"] == "No feedback file"]
+    original = other[other["Feedback_Status"] != "No feedback file"]
+    has_tracker = any(c in ds and ds[c].notna().any() for c in ("Tracker_Sent", "Tracker_Received"))
+    has_after = bool(rows["I_Exists"].any())
+    pct = lambda x, y: x / y if y else 0.0
 
     # 1 headline and coverage
-    t = (f"Departments asked for a net {net:+,.0f} MH ({net / P:+.1%}) on a Planning Input of {P:,.0f} MH "
+    t = (f"Departments asked for a net {net:+,.0f} MH ({pct(net, P):+.1%}) on a Planning Input of {P:,.0f} MH "
          f"(gross +{inc:,.0f} / {red:,.0f}). Feedback was processed for {len(proc)} of {len(ds)} departments, covering "
-         f"{proc['Planning_MH'].sum():,.0f} MH ({proc['Planning_MH'].sum() / P:.0%}) of Planning Input; {len(with_changes)} changed figures"
+         f"{proc['Planning_MH'].sum():,.0f} MH ({pct(proc['Planning_MH'].sum(), P):.0%}) of Planning Input; {len(with_changes)} changed figures"
          + (f"; {_depts(unchanged['DeptCode'])} returned comments without MH changes" if len(unchanged) else "")
          + (f"; {_depts(not_round['DeptCode'])} is not in the tracker's review round and its -c file has no MH change"
             if len(not_round) else "") + ".")
@@ -155,22 +161,30 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
             dates = sorted({d for d in not_prov["Tracker_Received"] if pd.notna(d)})
             parts.append(f"{_depts(not_prov['DeptCode'])} sent comments ({_and(f'{d:%d-%b-%y}' for d in dates)}) that were not "
                          "provided for analysis")
-        if len(other):
-            parts.append(f"{_depts(other['DeptCode'])} returned only the original")
-        t += (f" {len(missing)} departments ({missing['Planning_MH'].sum():,.0f} MH, {missing['Planning_MH'].sum() / P:.0%}) have no "
+        if len(original):
+            parts.append(f"{_depts(original['DeptCode'])} returned only the original")
+        if len(no_file):
+            parts.append(f"no file was received from {_depts(no_file['DeptCode'])}"
+                         + ("" if has_tracker else " (without the workflow tracker their comment status is unknown)"))
+        t += (f" {len(missing)} departments ({missing['Planning_MH'].sum():,.0f} MH, {pct(missing['Planning_MH'].sum(), P):.0%}) have no "
               "comment file in the data, so their original is used with no change: " + "; ".join(parts) + ".")
     f.append(t)
 
     # 2 largest deviations, absolute and relative
     top = with_changes.assign(a=with_changes["Net_Deviation"].abs()).sort_values("a", ascending=False).head(4)
-    pct = with_changes[with_changes["Planning_MH"] > 0].sort_values("Deviation_Pct", ascending=False).iloc[0]
-    f.append("Largest departmental deviations: " + "; ".join(
-        f"{r.DeptCode} {r.Department} {r.Net_Deviation:+,.0f} MH ({r.Deviation_Pct:+.0%})" for r in top.itertuples())
-             + f". Highest relative deviation: {pct.DeptCode} {pct.Department} {pct.Deviation_Pct:+.0%} ({pct.Net_Deviation:+,.0f} MH).")
+    rel = with_changes[with_changes["Planning_MH"] > 0].sort_values("Deviation_Pct", ascending=False)
+    if len(top):
+        f.append("Largest departmental deviations: " + "; ".join(
+            f"{r.DeptCode} {r.Department} {r.Net_Deviation:+,.0f} MH ({r.Deviation_Pct:+.0%})" for r in top.itertuples()) + "."
+                 + (f" Highest relative deviation: {rel.iloc[0].DeptCode} {rel.iloc[0].Department} {rel.iloc[0].Deviation_Pct:+.0%} "
+                    f"({rel.iloc[0].Net_Deviation:+,.0f} MH)." if len(rel) else ""))
+    else:
+        f.append("No department changed any man-hour figure.")
 
     # 3 most concern items, keeping ties with third place
     pc = ds[ds["Concern_Items"] > 0].sort_values(["Concern_Items", "Concern_Projects"], ascending=False)
-    pc = pc[pc["Concern_Items"] >= pc["Concern_Items"].iloc[min(2, len(pc) - 1)]]
+    if len(pc):
+        pc = pc[pc["Concern_Items"] >= pc["Concern_Items"].iloc[min(2, len(pc) - 1)]]
     groups = []
     for n, g in pc.groupby("Concern_Items", sort=False):
         if len(g) == 1:
@@ -179,7 +193,7 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
         else:
             groups.append(_and(f"{r.DeptCode} {r.Department}" for r in g.itertuples())
                           + f" ({int(n)} items each; {_and(str(int(x)) for x in g['Concern_Projects'])} projects)")
-    f.append("Most concern items: " + "; ".join(groups) + ".")
+    f.append("Most concern items: " + "; ".join(groups) + "." if groups else "No concern items were raised.")
 
     # 4 severity
     crit = ps[ps["Severity"] == "Critical"]
@@ -193,8 +207,8 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
         names = _and(f"{r.ProjectFull} ({r.Net_Change:+,.0f} MH)" for r in lead.itertuples())
         parts.append(f"{len(g)} project{'s' if len(g) > 1 else ''} raised by {n} departments"
                      + (f": {names}" if len(g) <= 2 else f", led by {names}"))
-    f.append(f"{len(crit)} projects rated Critical and {int((ps['Severity'] == 'High').sum())} High. Broadest concern: "
-             + "; then ".join(parts) + ".")
+    f.append(f"{len(crit)} projects rated Critical and {int((ps['Severity'] == 'High').sum())} High."
+             + (" Broadest concern: " + "; then ".join(parts) + "." if parts else ""))
 
     # 5 new allocations, with title variants, master flags and copy-paste caveats
     newp = rows[rows["Concern_Types"].str.contains("New Project|New Phase")]
@@ -220,9 +234,12 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
             txt += f"; its monthly profile repeats another project's in {cp[0]['File']} (possible copy-paste - confirm)"
         parts.append(txt)
     n_phase = int(newp["Primary_Type"].eq("New Phase Allocation").sum())
-    f.append(f"{len(newp)} new allocations ({len(newp) - n_phase} new projects, {n_phase} new phase allocations; "
-             f"{newp['Final_Total'].sum():,.0f} MH) were requested; the largest are " + "; ".join(parts)
-             + f". Only {int(newp['I_Exists'].sum())} of the {len(newp)} appear in the after-implementation data.")
+    if not len(newp):
+        f.append("No new allocations were requested.")
+    else:
+        f.append(f"{len(newp)} new allocations ({len(newp) - n_phase} new projects, {n_phase} new phase allocations; "
+             f"{newp['Final_Total'].sum():,.0f} MH) were requested; the largest are " + "; ".join(parts) + "."
+             + (f" Only {int(newp['I_Exists'].sum())} of the {len(newp)} appear in the after-implementation data." if has_after else ""))
 
     # 6 implementation
     gap_dep = ds[~ds["Feedback_Processed"]]
@@ -233,24 +250,34 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
     big_silent = silent.sort_values("Unrequested_Gross", ascending=False).iloc[0] if len(silent) else None
     unreq_net = ds["Unrequested_Net"].sum()
     share = "essentially all" if abs(I - P) > 0 and abs(unreq_net - (I - P)) <= 0.05 * abs(I - P) else "most"
-    f.append(f"Implementation: of {req:,.0f} MH of requested change, about {impl:,.0f} MH ({impl / req:.0%}) appears in the "
-             f"after-implementation extract. Separately, the extract differs from Planning Input by {unreq:,.0f} MH (gross) "
-             f"in cells where no department asked for a change, so {share} of the {I - P:+,.0f} MH movement is not explained by "
-             "comments and should be reconciled before the extract is used as 'final'."
-             + (f" Of that gross movement, {gap_prov:,.0f} MH is in {_depts(not_prov['DeptCode'])}, whose comments were sent but "
-                "not provided (it may be implemented comments)," if gap_prov >= 1 else " Of that gross movement,")
-             + (f" {gap_silent:,.0f} MH is in departments that sent no comments ({_depts(silent['DeptCode'])}; largest "
-                f"{big_silent.DeptCode}, {big_silent.Unrequested_Gross:,.0f} MH), so it is planner change without any comment, and "
-                if gap_silent >= 1 and big_silent is not None else "")
-             + f" {unreq - gap:,.0f} MH is in departments whose comments were processed."
-             + (f" {note}" if note else ""))
+    if not has_after:
+        t = ("Implementation: no after-implementation extract was provided, so implementation is not measured yet"
+             + (f" ({req:,.0f} MH of change was requested)." if req >= 1 else "."))
+    else:
+        t = (f"Implementation: of {req:,.0f} MH of requested change, about {impl:,.0f} MH ({pct(impl, req):.0%}) appears in the "
+             "after-implementation extract." if req >= 1 else "Implementation: no man-hour change was requested.")
+        if unreq >= 1:
+            t += (f" Separately, the extract differs from Planning Input by {unreq:,.0f} MH (gross) in cells where no department "
+                  "asked for a change"
+                  + (f", so {share} of the {I - P:+,.0f} MH movement is not explained by comments" if abs(I - P) >= 1 else "")
+                  + " and should be reconciled before the extract is used as 'final'."
+                  + (f" Of that gross movement, {gap_prov:,.0f} MH is in {_depts(not_prov['DeptCode'])}, whose comments were sent but "
+                     "not provided (it may be implemented comments)," if gap_prov >= 1 else " Of that gross movement,")
+                  + (f" {gap_silent:,.0f} MH is in departments that sent no comments ({_depts(silent['DeptCode'])}; largest "
+                     f"{big_silent.DeptCode}, {big_silent.Unrequested_Gross:,.0f} MH), so it is planner change without any comment, and "
+                     if gap_silent >= 1 and big_silent is not None else "")
+                  + f" {unreq - gap:,.0f} MH is in departments whose comments were processed.")
+        else:
+            t += " Outside the requested cells the extract equals Planning Input."
+    f.append(t + (f" {note}" if note else ""))
 
     # 7 schedule extensions
     ext = rows[rows["Concern_Types"].str.contains("Schedule Extension")]
     ext_top = ext.groupby("ProjectFull").agg(MH=("Extension_MH", "sum"), D=("DeptCode", "nunique")).sort_values("MH", ascending=False).head(4)
-    f.append(f"{len(ext)} rows extend the schedule beyond the baseline finish ({ext['Extension_MH'].sum():,.0f} MH falls after "
-             "the planned end). Largest: " + "; ".join(f"{k} ({v.MH:,.0f} MH, {int(v.D)} dept{'s' if v.D > 1 else ''})"
-                                                     for k, v in ext_top.iterrows()) + ".")
+    if len(ext):
+        f.append(f"{len(ext)} rows extend the schedule beyond the baseline finish ({ext['Extension_MH'].sum():,.0f} MH falls after "
+                 "the planned end). Largest: " + "; ".join(f"{k} ({v.MH:,.0f} MH, {int(v.D)} dept{'s' if v.D > 1 else ''})"
+                                                         for k, v in ext_top.iterrows()) + ".")
 
     # 8 Loan To
     loan = rows[rows["Concern"] & (rows["Phase"] == "Loan To")]
@@ -271,6 +298,8 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
                              f"{t['Added Project']} {t['Added Phase']} +{t['Added MH']:,.0f} MH")
         for t in tr.itertuples():
             sub = rows[(rows["DeptCode"] == t.DeptCode) & (rows["ProjectBase"] == t.ProjectBase) & (rows["Net_Change"].abs() >= 1)]
+            if not ((sub["Net_Change"] < 0).any() and (sub["Net_Change"] > 0).any()):
+                continue
             dn = sub[sub["Net_Change"] < 0].iloc[0]
             up = sub[sub["Net_Change"] > 0].iloc[0]
             items.append(f"{t.DeptCode}: {dn.ProjectFull} {dn.Phase} {dn.Net_Change:,.0f} MH moved to {up.ProjectFull} {up.Phase} "
@@ -285,9 +314,10 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
         for r in cc.itertuples():
             old, new = r.CodeCorrection.split(" (")[0].split(" -> ")
             if "typed in column A" not in r.CodeCorrection:
+                # as new work the new code adds its full value and the baseline row stays: net rises by the baseline
                 notes.append(f"{r.DeptCode} re-coded {old} as {new} ({r.Final_Total:,.0f} MH); it is paired with its baseline - "
                              f"counted as new work with the baseline retained, the company net would be "
-                             f"{net + r.Final_Total:+,.0f} MH ({r.Final_Total:+,.0f})")
+                             f"{net + r.P_Total:+,.0f} MH ({r.P_Total:+,.0f})")
             elif r.P_Exists:
                 notes.append(f"{r.DeptCode} typed {new} in column A on the {old} row ({r.Final_Total:,.0f} MH); the activity code is "
                              f"kept - if {new} is confirmed, that MH belongs to {new} instead (as new work with the "
@@ -309,13 +339,22 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
     hdr = sum(i["Impact_MH"] or 0 for i in issues if i["Issue"].startswith("Department / sub-department total rows"))
     nonmonth = sorted({i["File"] for i in issues if i["Issue"].startswith("Non-month column")})
     direct = sorted(rows.loc[rows["D_SourceType"].fillna("").eq("Source workbook"), "D_File"].dropna().unique())
+    summary = next((i for i in issues if i["Area"] == "Copilot check" and i["Severity"] == "Info"), None)
+    differ = [i for i in issues if i["Area"] == "Copilot check" and i["Severity"] != "Info"]
+    n_checked = int(summary["Detail"].split(" ")[0]) if summary else 0
+    if n_checked:
+        k = sum(int(i["Detail"].split(" of ")[0].replace(",", "")) for i in differ)
+        check = (f"Compared project by month with the {n_checked} department files read directly, it "
+                 + (f"differs in {_and(sorted({i['File'] for i in differ}, key=int))} ({k:,} cell{'s' if k != 1 else ''}; "
+                    "see Data Quality Log)" if differ else "agrees")
+                 + "; the files are used there, and the corrected table only where no file was provided.")
+    else:
+        check = "Its values were reused after correction."
     if hdr or dup or nonmonth:
         f.append("The Copilot 3-scenario model is not reliable as built: it counted department total rows as projects "
                  f"({hdr:,.0f} MH across scenarios)"
                  + (f", a non-month column in {', '.join(nonmonth)} as a month" if nonmonth else "")
-                 + f", and after-implementation blocks that repeat other departments ({dup:,.0f} MH). "
-                 + (f"Its project-level values were checked cell by cell against the {len(direct)} feedback files read "
-                    "directly and reused after correction." if direct else "Its values were reused after correction."))
+                 + f", and after-implementation blocks that repeat other departments ({dup:,.0f} MH). " + check)
 
     # 13 capacity: averages, company peak, months over capacity
     util = ds.dropna(subset=["Firm_Utilisation_Final"]).sort_values("Firm_Utilisation_Final", ascending=False).head(5)
@@ -339,20 +378,26 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
     # ---------------------------------------------------------------- actions
     crit_codes = ps[ps["Severity"] == "Critical"].sort_values("Gross_Increase", ascending=False)
     new_crit = [c for c in crit_codes["ProjectFull"] if c in set(big_new.index)][:2]
-    widest = ps.sort_values(["Depts_Concerned", "Gross_Increase"], ascending=False)["ProjectFull"].head(2).tolist()
+    widest = ps[ps["Depts_Concerned"] > 0].sort_values(["Depts_Concerned", "Gross_Increase"], ascending=False)["ProjectFull"].head(2).tolist()
+    first = "Critical" if len(crit_codes) else "High" if (ps["Severity"] == "High").any() else ""
     placeholder = (crit_codes.loc[crit_codes["Master_Flag"].fillna("").str.startswith("Internal / overhead"), "ProjectFull"].tolist()
                    if "Master_Flag" in crit_codes else [])
-    a = [
-        "Corporate Planning to rule on the Critical projects first (see Project Ranking): accept, reduce or return each change with a "
-        "reason, starting with " + (f"the new projects {_and(new_crit)} and " if new_crit else "")
-        + f"the most widely raised projects {_and(widest)}"
-        + (f"; assign a proper project code to {_and(placeholder)} (an internal account in the project master)" if placeholder else "")
-        + ".",
-        "Planners to close every 'Not implemented' item in Implementation Tracking: implement it or mark it 'not applicable' with a reason, "
-        "so the checklist no longer depends on email follow-up.",
-        "Reconcile the after-implementation extract: explain the MH that changed without a discipline comment before the forecast is locked"
-        + (", starting with the departments whose comments were not processed." if gap >= 1 else "."),
-    ]
+    a = []
+    plural = lambda xs, one, many: f"{one if len(xs) == 1 else many} {_and(xs)}"
+    if rows["Concern"].any():
+        a.append((f"Corporate Planning to rule on the {first} projects first (see Project Ranking)" if first else
+                  "Corporate Planning to rule on each request in Project Ranking order")
+                 + ": accept, reduce or return each change with a reason"
+                 + ((", starting with " + (plural(new_crit, "the new project", "the new projects") + " and " if new_crit else "")
+                     + plural(widest, "the most widely raised project", "the most widely raised projects")) if widest else "")
+                 + (f"; assign a proper project code to {_and(placeholder)} (an internal account in the project master)" if placeholder else "")
+                 + ".")
+    if has_after and rows["Implementation_Status"].str.startswith("Not implemented").any():
+        a.append("Planners to close every 'Not implemented' item in Implementation Tracking: implement it or mark it 'not applicable' "
+                 "with a reason, so the checklist no longer depends on email follow-up.")
+    if has_after and unreq >= 1:
+        a.append("Reconcile the after-implementation extract: explain the MH that changed without a discipline comment before the "
+                 "forecast is locked" + (", starting with the departments whose comments were not processed." if gap >= 1 else "."))
     if len(missing):
         parts = []
         if len(not_prov):
@@ -360,8 +405,10 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
                          f"({_and(sorted({f'{d:%d-%b-%y}' for d in not_prov['Tracker_Received'] if pd.notna(d)}))})")
         if len(not_recv):
             parts.append(f"chase {_depts(not_recv['DeptCode'])} for comments or a written 'no comments'")
-        if len(other):
-            parts.append(f"confirm 'no comments' from {_depts(other['DeptCode'])}")
+        if len(original):
+            parts.append(f"confirm 'no comments' from {_depts(original['DeptCode'])} (they returned the original)")
+        if len(no_file):
+            parts.append(f"obtain the feedback, or a written 'no comments', from {_depts(no_file['DeptCode'])}")
         txt = "; ".join(parts)
         a.append(txt[0].upper() + txt[1:] + f", so the analysis covers all {len(ds)} departments.")
     cat = []
@@ -369,15 +416,18 @@ def build_findings(ds, ps, rows, issues, mdf, cap, note: str = "", possible=None
         cat.append(f"{dept} ({len(g)} rows)")
     for t in tr.itertuples():
         cat.append(f"{t.DeptCode} ({t.ProjectBase}: {t.phases_down} -> {t.phases_up})")
-    if cat or n_pt or len(loan):
-        txt = "Confirm the category changes requested by " + _and(cat) if cat else "Confirm"
-        if n_pt:
-            txt += (("; also the" if cat else " the") + " possible transfers in " + _and(
-                f"{t['Dept']} ({t['Reduced Project']} {t['Reduced Phase']} -> {t['Added Project']} {t['Added Phase']})"
-                for _, t in possible.iterrows()))
-        if len(loan):
-            txt += f" and the {len(loan)} Loan To changes, which are Corporate Planning controlled"
-        a.append(txt + ".")
+    txt = ""
+    if cat:
+        txt = "the category changes requested by " + _and(cat)
+    if n_pt:
+        txt += ("; also " if txt else "") + "the possible transfers in " + _and(
+            f"{t['Dept']} ({t['Reduced Project']} {t['Reduced Phase']} -> {t['Added Project']} {t['Added Phase']})"
+            for _, t in possible.iterrows())
+    if len(loan):
+        txt += (" and " if txt else "") + (f"the {len(loan)} Loan To changes, which are Corporate Planning controlled" if len(loan) > 1
+                                           else "the Loan To change, which is Corporate Planning controlled")
+    if txt:
+        a.append("Confirm " + txt + ".")
     if len(cc):
         a.append("Confirm the department code changes in Primavera before the next cycle: "
                  + _and(f"{r.DeptCode} {r.CodeCorrection.split(' (')[0]}" for r in cc.itertuples()) + ".")
@@ -470,7 +520,8 @@ def main():
             bits.append(f"{len(copilot[sc])} departments from the corrected Copilot table")
         src.append(f"{sc}: " + "; ".join(bits) if bits else f"{sc}: none")
     if a.copilot_fact:
-        src.append(f"Copilot table: {Path(a.copilot_fact).name} (validated cell by cell against every file read directly)")
+        src.append(f"Copilot table: {Path(a.copilot_fact).name} (compared project by month with every file read directly; "
+                   "differences are in the Data Quality Log)")
     for label, path in (("Headcount", a.employees), ("Project master", a.master), ("Workflow tracker", a.tracker),
                         ("Critical projects checklist", a.checklist)):
         if path:
@@ -479,7 +530,7 @@ def main():
     lim = []
     if copilot["Planning Input"]:
         lim.append(f"Original 'To Departments' workbooks were not uploaded for {len(copilot['Planning Input'])} departments; their "
-                   "Planning Input comes from the validated Copilot table")
+                   "Planning Input comes from the corrected Copilot table")
     if copilot["System Implementation"]:
         lim.append("After Implementation comes from the Copilot table for all departments (no 'after' workbooks uploaded)"
                    if not direct["System Implementation"] else
@@ -487,14 +538,20 @@ def main():
     if len(missing):
         lim.append(f"No comment file was available for {_depts(missing['DeptCode'])}; their original is used with no change")
     lim.append("Headcount date of 'Table for Emails' unconfirmed")
+    processed = set(fb.loc[fb["Feedback_Processed"].astype(bool), "DeptCode"].astype(str))
+    cop_fb = [d for d in copilot["Discipline Comment"] if str(d) in processed]
+    cop_orig = [d for d in copilot["Discipline Comment"] if str(d) not in processed]
     meta = dict(cycle=a.cycle, window=window, generated=dt.date.today().strftime("%d-%b-%Y"), sources=" | ".join(src),
                 limitations=". ".join(lim) + ".", n_direct_feedback=len(direct["Discipline Comment"]),
-                n_copilot_feedback=len(copilot["Discipline Comment"]))
+                n_copilot_feedback=len(copilot["Discipline Comment"]),
+                copilot_feedback_text=", ".join(x for x in (
+                    f"{len(cop_fb)} departments' feedback ({_depts(cop_fb)})" if cop_fb else "",
+                    f"{len(cop_orig)} originals" if cop_orig else "") if x) + " this cycle" if copilot["Discipline Comment"] else "none this cycle")
     paired = rows[(rows["CodeCorrection"] != "") & ~rows["CodeCorrection"].str.contains("typed in column A")]
     meta["bridge_memo"] = [
         ("possible transfers inside the gross figures (counted in both an increase and a reduction)",
          float((possible["Possible Offset MH"].sum() if len(possible) else 0) + (transfers["Transfer_MH"].sum() if len(transfers) else 0))),
-        ("code corrections paired with their baseline (would add this if counted as new work)", float(paired["Final_Total"].sum()))]
+        ("code corrections paired with their baseline (would add this if counted as new work)", float(paired["P_Total"].sum()))]
     findings, actions = build_findings(ds, ps, rows, issues, mdf, cap, a.note, possible, transfers, peaks)
     tag = a.cycle.replace(" ", "_")
     write_workbook(out / f"ENPPI_Workload_Comments_Analysis_{tag}.xlsx", rows=rows, cells=cells, transfers=transfers,
@@ -517,7 +574,7 @@ def main():
                    possible=all_pairs, fb=fb, inventory=inv)
     pd.DataFrame(issues).to_csv(out / "issues_log.csv", index=False)
     if a.webapp_export:
-        print("web application import files:", export_webapp(Path(a.webapp_export), rows=rows, cells=cells, cap=cap))
+        print("web application import files:", export_webapp(Path(a.webapp_export), rows=rows, cells=cells, cap=cap, fb=fb))
     print("\n".join(findings))
     print("\nACTIONS\n" + "\n".join(actions))
     print(f"\nWritten to {out}")

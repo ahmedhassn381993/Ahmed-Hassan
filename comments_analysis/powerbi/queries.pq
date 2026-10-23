@@ -14,11 +14,17 @@ let
     Names    = List.Transform(columnTypes, each _{0}),
     Files    = Folder.Files(OutputRoot),
     Picked   = Table.SelectRows(Files, each [Name] = fileName),
-    Parsed   = List.Transform(Picked[Content], each
+    WithData = Table.AddColumn(Picked, "Data", each
                    Table.TransformColumnNames(        // drop a byte-order mark left on the first header
-                       Table.PromoteHeaders(Csv.Document(_, [Delimiter = ",", Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+                       Table.PromoteHeaders(Csv.Document([Content], [Delimiter = ",", Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
                                             [PromoteAllScalars = true]),
                        each Text.Replace(_, "#(FEFF)", ""))),
+    // the same cycle run twice under OutputRoot: keep only the newest file per cycle (files without a Cycle column are kept)
+    Keyed    = Table.AddColumn(WithData, "CycleKey", each
+                   if Table.HasColumns([Data], "Cycle") and not Table.IsEmpty([Data]) then Text.From([Data]{0}[Cycle])
+                   else [Folder Path] & [Name]),
+    Newest   = Table.Group(Keyed, {"CycleKey"}, {{"Data", each Table.Sort(_, {{"Date modified", Order.Descending}}){0}[Data]}}),
+    Parsed   = Newest[Data],
     Combined = if List.IsEmpty(Parsed) then #table(Names, {}) else Table.Combine(Parsed),
     // columns added in later cycles are null in older ones; unknown columns are dropped
     Complete = List.Accumulate(Names, Combined, (t, n) => if Table.HasColumns(t, n) then t else Table.AddColumn(t, n, each null)),
@@ -80,7 +86,10 @@ let
         {"Bridge Extension MH", type number},
         {"Bridge Reduction MH", type number},
         {"Bridge Removed MH", type number},
-        {"Master Flag", type text}})
+        {"Master Flag", type text},
+        {"Project Severity", type text},
+        {"Project Severity Points", Int64.Type},
+        {"Project Severity Order", Int64.Type}})
 in
     Source
 
@@ -122,6 +131,17 @@ let
         {"Division", Int64.Type},
         {"Service", type text},
         {"Dept Label", type text},
+        {"As Of", type date}}),
+    Sorted = Table.Buffer(Table.Sort(Source, {{"As Of", Order.Descending}})),
+    Latest = Table.Distinct(Sorted, {"DeptCode"})
+in
+    Latest
+
+// ---- FactDeptCycle ----
+let
+    Source = fnLoadCsv("DimDepartment.csv", {
+        {"Cycle", type text},
+        {"DeptCode", Int64.Type},
         {"Managers", Int64.Type},
         {"LoanTo_Unpaid", Int64.Type},
         {"Permanent", Int64.Type},
@@ -132,12 +152,9 @@ let
         {"Feedback Status", type text},
         {"Feedback Processed", type text},
         {"Sent To Dept", type date},
-        {"Comments Received", type date},
-        {"As Of", type date}}),
-    Sorted = Table.Buffer(Table.Sort(Source, {{"As Of", Order.Descending}})),
-    Latest = Table.Distinct(Sorted, {"DeptCode"})
+        {"Comments Received", type date}})
 in
-    Latest
+    Source
 
 // ---- DimProject ----
 let
@@ -151,12 +168,7 @@ let
         {"Master Category", type text},
         {"Master Flag", type text},
         {"Title Variants", type text},
-        {"Project Label", type text},
-        {"Severity", type text},
-        {"Severity Points", Int64.Type},
-        {"Depts Concerned", Int64.Type},
-        {"Departments Raising", type text},
-        {"Severity Order", Int64.Type}}),
+        {"Project Label", type text}}),
     Latest = Table.Distinct(Source, {"ProjectCode"})
 in
     Latest
